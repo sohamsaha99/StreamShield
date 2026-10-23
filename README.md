@@ -32,6 +32,24 @@ The repository has `gradle/wrapper/gradle-wrapper.properties` but no `gradlew` s
 `gradle wrapper` once, or open the project in Android Studio. Release signing reads
 `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from the environment.
 
+### Build on GitHub
+
+`.github/workflows/build-apk.yml` builds a debug APK on every push to `main`, on pull requests,
+and on demand (**Actions → Build APK → Run workflow**). Download it from the run page under
+**Artifacts → StreamShield-debug-apk** (a zip containing the APK).
+
+To let each new APK install over the previous one, sign them all with the same key. Store a
+keystore once as a repository secret: **Settings → Secrets and variables → Actions → New
+repository secret**, name `DEBUG_KEYSTORE_BASE64`, value from:
+
+```sh
+keytool -genkeypair -keystore debug.keystore -storepass android -keypass android \
+  -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug"
+base64 -w0 debug.keystore      # macOS: base64 -i debug.keystore
+```
+
+Without the secret, every build gets a new key and you must uninstall before installing.
+
 Tests for the injected page script run in headless Chromium:
 
 ```sh
