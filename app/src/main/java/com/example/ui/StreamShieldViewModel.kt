@@ -4,21 +4,17 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.ActivePlaybackItem
-import com.example.data.AppTab
 import com.example.data.BookmarkEntity
-import com.example.data.DownloadEntity
-import com.example.data.DownloadFormatOption
-import com.example.data.DownloadTargetInfo
 import com.example.data.ShieldPreferencesState
 import com.example.data.StreamShieldDatabase
 import com.example.data.UserPreferencesRepository
 import com.example.data.WatchHistoryEntity
-import com.example.data.extractYouTubeVideoId
-import com.example.data.formatSpeedBadge
-import com.example.engine.DownloadAndStreamEngine
-import com.example.engine.StorageStats
+import com.example.data.WebVideoState
+import com.example.engine.SponsorBlockClient
 import com.example.service.BackgroundPlaybackService
+import com.example.service.PlaybackCommand
+import com.example.service.PlaybackCommands
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,92 +23,55 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.io.File
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+const val HOME_URL = "https://m.youtube.com"
 
 data class BrowserUiState(
-    val currentUrl: String = "https://m.youtube.com",
-    val omniboxInput: String = "https://m.youtube.com",
-    val pageTitle: String = "YouTube (Brave Shield Active)",
+    val url: String = HOME_URL,
+    val title: String = "",
     val isLoading: Boolean = false,
     val canGoBack: Boolean = false,
-    val canGoForward: Boolean = false,
-    val detectedVideoTitle: String = "YouTube Stream",
-    val detectedVideoChannel: String = "YouTube",
-    val detectedVideoDurationSec: Int = 240,
-    val detectedDirectStreamUrl: String = "",
-    val isWebVideoPlaying: Boolean = false,
-    val sessionBlockedCount: Int = 14
+    val canGoForward: Boolean = false
 )
+
+data class BlockCounts(val ads: Long = 0L, val requests: Long = 0L)
+
+data class SponsorSegments(val videoId: String, val json: String)
 
 class StreamShieldViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = StreamShieldDatabase.getInstance(application)
     private val prefsRepo = UserPreferencesRepository(application)
-    private val engine = DownloadAndStreamEngine(
-        context = application,
-        downloadDao = database.downloadDao(),
-        scope = viewModelScope
-    )
+    private val sponsorBlock = SponsorBlockClient()
 
+    // Eager: the page script reads the current config synchronously at document start.
     val preferences: StateFlow<ShieldPreferencesState> = prefsRepo.preferencesFlow
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = ShieldPreferencesState()
-        )
-
-    val allDownloads: StateFlow<List<DownloadEntity>> = database.downloadDao()
-        .observeAllDownloads()
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyList()
-        )
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ShieldPreferencesState())
 
     val bookmarks: StateFlow<List<BookmarkEntity>> = database.bookmarkDao()
         .observeAllBookmarks()
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyList()
-        )
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val watchHistory: StateFlow<List<WatchHistoryEntity>> = database.watchHistoryDao()
         .observeRecentHistory()
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyList()
-        )
-
-    val storageStats: StateFlow<StorageStats> = allDownloads
-        .combine(preferences) { list, _ ->
-            engine.computeStorageStats(list)
-        }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = engine.computeStorageStats(emptyList())
-        )
-
-    private val _selectedTab = MutableStateFlow(AppTab.BRAVE_BROWSER)
-    val selectedTab: StateFlow<AppTab> = _selectedTab.asStateFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _browserState = MutableStateFlow(BrowserUiState())
     val browserState: StateFlow<BrowserUiState> = _browserState.asStateFlow()
 
-    private val _activePlayback = MutableStateFlow<ActivePlaybackItem?>(null)
-    val activePlayback: StateFlow<ActivePlaybackItem?> = _activePlayback.asStateFlow()
+    private val _videoState = MutableStateFlow(WebVideoState())
+    val videoState: StateFlow<WebVideoState> = _videoState.asStateFlow()
 
-    private val _isNativePlaying = MutableStateFlow(false)
-    val isNativePlaying: StateFlow<Boolean> = _isNativePlaying.asStateFlow()
+    private val _omniboxInput = MutableStateFlow(HOME_URL)
+    val omniboxInput: StateFlow<String> = _omniboxInput.asStateFlow()
 
-    private val _isNativeMinimized = MutableStateFlow(false)
-    val isNativeMinimized: StateFlow<Boolean> = _isNativeMinimized.asStateFlow()
-
-    private val _downloadSheetTarget = MutableStateFlow<DownloadTargetInfo?>(null)
-    val downloadSheetTarget: StateFlow<DownloadTargetInfo?> = _downloadSheetTarget.asStateFlow()
+    private val _showSettings = MutableStateFlow(false)
+    val showSettings: StateFlow<Boolean> = _showSettings.asStateFlow()
 
     private val _showSpeedSheet = MutableStateFlow(false)
     val showSpeedSheet: StateFlow<Boolean> = _showSpeedSheet.asStateFlow()
@@ -123,228 +82,204 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _isInPipMode = MutableStateFlow(false)
     val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
 
+    private val _sponsorSegments = MutableStateFlow<SponsorSegments?>(null)
+    val sponsorSegments: StateFlow<SponsorSegments?> = _sponsorSegments.asStateFlow()
+
+    // Block counters: increments stay in memory and are flushed to DataStore in batches.
+    private val pendingCounts = MutableStateFlow(BlockCounts())
+    val blockCounts: StateFlow<BlockCounts> = combine(preferences, pendingCounts) { prefs, pending ->
+        BlockCounts(prefs.adsBlockedCount + pending.ads, prefs.requestsBlockedCount + pending.requests)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BlockCounts())
+    private var flushJob: Job? = null
+    private val flushMutex = Mutex()
+
     private var bannerJob: Job? = null
+    private var sponsorJob: Job? = null
+    private var bgSessionActive = false
+    private var lastBgSignature = ""
+    private var lastHistoryKey = ""
 
     init {
         seedInitialBookmarksIfEmpty()
+        viewModelScope.launch {
+            PlaybackCommands.flow.collect { command ->
+                if (command == PlaybackCommand.STOP) {
+                    bgSessionActive = false
+                    lastBgSignature = ""
+                }
+            }
+        }
     }
 
     private fun seedInitialBookmarksIfEmpty() {
         viewModelScope.launch {
             if (database.bookmarkDao().countBookmarks() == 0) {
                 val defaults = listOf(
-                    BookmarkEntity(title = "YouTube Home", url = "https://m.youtube.com", category = "Home"),
-                    BookmarkEntity(title = "Music & Lo-Fi", url = "https://m.youtube.com/results?search_query=lofi+hip+hop+radio", category = "Music"),
-                    BookmarkEntity(title = "4K Nature & Space", url = "https://m.youtube.com/results?search_query=4k+nature+relaxation+video", category = "4K"),
-                    BookmarkEntity(title = "Tech & Coding", url = "https://m.youtube.com/results?search_query=android+kotlin+development", category = "Tech"),
-                    BookmarkEntity(title = "Podcasts", url = "https://m.youtube.com/results?search_query=science+technology+podcast", category = "Podcasts")
+                    BookmarkEntity(title = "Home", url = HOME_URL, category = "Home"),
+                    BookmarkEntity(title = "Subscriptions", url = "$HOME_URL/feed/subscriptions", category = "Home"),
+                    BookmarkEntity(title = "Lo-Fi", url = "$HOME_URL/results?search_query=lofi+hip+hop+radio", category = "Music")
                 )
                 defaults.forEach { database.bookmarkDao().insertBookmark(it) }
             }
         }
     }
 
-    fun selectTab(tab: AppTab) {
-        _selectedTab.value = tab
+    // ---------------------------------------------------------------------------------------
+    // Navigation & page state
+    // ---------------------------------------------------------------------------------------
+
+    /** Turns omnibox text into a URL: full URLs pass through, anything else is a YouTube search. */
+    fun resolveOmniboxInput(rawInput: String): String? {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) return null
+        return when {
+            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
+            trimmed.startsWith("youtube.com/") || trimmed.startsWith("m.youtube.com/") ||
+                trimmed.startsWith("www.youtube.com/") || trimmed.startsWith("youtu.be/") -> "https://$trimmed"
+            else -> "$HOME_URL/results?search_query=${Uri.encode(trimmed)}"
+        }
     }
+
+    fun updateOmniboxInput(input: String) {
+        _omniboxInput.value = input
+    }
+
+    fun onPageChanged(url: String, title: String?, canBack: Boolean, canForward: Boolean, loading: Boolean) {
+        val previousUrl = _browserState.value.url
+        _browserState.value = BrowserUiState(
+            url = url,
+            title = title?.takeIf { it.isNotBlank() && !it.startsWith("http") } ?: _browserState.value.title,
+            isLoading = loading,
+            canGoBack = canBack,
+            canGoForward = canForward
+        )
+        if (url != previousUrl) _omniboxInput.value = url
+    }
+
+    fun onVideoState(state: WebVideoState) {
+        val previous = _videoState.value
+        _videoState.value = state
+
+        if (state.videoId.isNotBlank() && state.videoId != previous.videoId) {
+            val prefs = preferences.value
+            if (!prefs.rememberSpeedAcrossVideos && previous.videoId.isNotBlank() && prefs.playbackSpeed != 1.0f) {
+                setPlaybackSpeed(1.0f)
+            }
+            loadSponsorSegments(state.videoId)
+        }
+
+        if (state.isPlaying && state.videoId.isNotBlank() && state.title.isNotBlank()) {
+            val key = "${state.videoId}|${state.title}"
+            if (key != lastHistoryKey) {
+                lastHistoryKey = key
+                recordHistory("$HOME_URL/watch?v=${state.videoId}", state.title, state.channel)
+            }
+        }
+
+        syncBackgroundService(state)
+    }
+
+    private fun loadSponsorSegments(videoId: String) {
+        sponsorJob?.cancel()
+        if (!preferences.value.sponsorSkipEnabled) return
+        sponsorJob = viewModelScope.launch {
+            val segments = withContext(Dispatchers.IO) { sponsorBlock.fetchSegments(videoId) }
+            _sponsorSegments.value = SponsorSegments(videoId, SponsorBlockClient.segmentsToJson(segments))
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Ad-block counters (called from WebView threads)
+    // ---------------------------------------------------------------------------------------
+
+    /** An ad/tracker network request was refused. */
+    fun onRequestBlocked() {
+        pendingCounts.update { it.copy(requests = it.requests + 1) }
+        scheduleCountFlush()
+    }
+
+    /** A whole ad was prevented (removed from a YouTube response, or skipped in the player). */
+    fun onAdBlocked() {
+        pendingCounts.update { it.copy(ads = it.ads + 1) }
+        scheduleCountFlush()
+    }
+
+    private fun scheduleCountFlush() {
+        if (flushJob?.isActive == true) return
+        flushJob = viewModelScope.launch {
+            delay(5_000L)
+            flushCounts()
+        }
+    }
+
+    private suspend fun flushCounts() = flushMutex.withLock {
+        val snapshot = pendingCounts.value
+        if (snapshot.ads == 0L && snapshot.requests == 0L) return@withLock
+        prefsRepo.addBlockedCounts(snapshot.ads, snapshot.requests)
+        pendingCounts.update { BlockCounts(it.ads - snapshot.ads, it.requests - snapshot.requests) }
+    }
+
+    /** Called when the app goes to the background so a process kill loses nothing. */
+    fun flushCountsNow() {
+        viewModelScope.launch { flushCounts() }
+    }
+
+    fun resetBlockCounts() {
+        viewModelScope.launch {
+            flushMutex.withLock {
+                pendingCounts.value = BlockCounts()
+                prefsRepo.resetBlockedCounts()
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Background playback
+    // ---------------------------------------------------------------------------------------
+
+    private fun syncBackgroundService(state: WebVideoState) {
+        if (!preferences.value.backgroundPlayEnabled) {
+            stopBackgroundSession()
+            return
+        }
+        // Nothing to show until something actually plays; after that keep the controls updated.
+        if (!state.isPlaying && !bgSessionActive) return
+        val signature = "${state.title}|${state.channel}|${state.durationSec}|${state.isPlaying}"
+        if (signature == lastBgSignature) return
+        BackgroundPlaybackService.update(
+            context = getApplication(),
+            title = state.title,
+            artist = state.channel,
+            durationSec = state.durationSec,
+            playing = state.isPlaying,
+            alreadyRunning = bgSessionActive
+        )
+        bgSessionActive = true
+        lastBgSignature = signature
+    }
+
+    private fun stopBackgroundSession() {
+        if (bgSessionActive) BackgroundPlaybackService.stop(getApplication())
+        bgSessionActive = false
+        lastBgSignature = ""
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // UI state
+    // ---------------------------------------------------------------------------------------
 
     fun setPipMode(inPip: Boolean) {
         _isInPipMode.value = inPip
     }
 
-    fun showBanner(message: String) {
-        bannerJob?.cancel()
-        _statusBanner.value = message
-        bannerJob = viewModelScope.launch {
-            delay(3200L)
-            _statusBanner.value = null
-        }
+    fun openSettings() {
+        _showSettings.value = true
     }
 
-    fun dismissBanner() {
-        _statusBanner.value = null
+    fun closeSettings() {
+        _showSettings.value = false
     }
 
-    // Browser Actions
-    fun updateOmniboxInput(input: String) {
-        _browserState.value = _browserState.value.copy(omniboxInput = input)
-    }
-
-    fun submitOmniboxQueryOrUrl(rawInput: String) {
-        val trimmed = rawInput.trim()
-        if (trimmed.isEmpty()) return
-        val targetUrl = when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
-            trimmed.contains("youtube.com/") || trimmed.contains("youtu.be/") -> "https://$trimmed"
-            else -> "https://m.youtube.com/results?search_query=${Uri.encode(trimmed)}"
-        }
-        _browserState.value = _browserState.value.copy(
-            currentUrl = targetUrl,
-            omniboxInput = targetUrl
-        )
-        _selectedTab.value = AppTab.BRAVE_BROWSER
-    }
-
-    fun openVideoInBraveBrowser(youtubeUrl: String, title: String, channel: String, durationSec: Int) {
-        _browserState.value = _browserState.value.copy(
-            currentUrl = youtubeUrl,
-            omniboxInput = youtubeUrl,
-            detectedVideoTitle = title,
-            detectedVideoChannel = channel,
-            detectedVideoDurationSec = durationSec
-        )
-        _selectedTab.value = AppTab.BRAVE_BROWSER
-        recordHistory(youtubeUrl, title, channel)
-    }
-
-    fun onWebPageChanged(url: String, title: String?, canBack: Boolean, canForward: Boolean, loading: Boolean) {
-        _browserState.value = _browserState.value.copy(
-            currentUrl = url,
-            omniboxInput = url,
-            pageTitle = title?.takeIf { it.isNotBlank() } ?: "YouTube (Shield Active)",
-            canGoBack = canBack,
-            canGoForward = canForward,
-            isLoading = loading
-        )
-    }
-
-    fun onWebVideoMetadataDetected(
-        title: String,
-        channel: String,
-        url: String,
-        durationSec: Int,
-        isPlaying: Boolean,
-        directStreamUrl: String
-    ) {
-        val cleanTitle = title.trim().ifEmpty { "YouTube Video Stream" }
-        val cleanChannel = channel.trim().ifEmpty { "YouTube Creator" }
-        val prev = _browserState.value
-        _browserState.value = prev.copy(
-            detectedVideoTitle = cleanTitle,
-            detectedVideoChannel = cleanChannel,
-            detectedVideoDurationSec = durationSec.coerceAtLeast(60),
-            detectedDirectStreamUrl = directStreamUrl.ifBlank { prev.detectedDirectStreamUrl },
-            isWebVideoPlaying = isPlaying
-        )
-
-        if (isPlaying && url.contains("watch") && prev.currentUrl != url) {
-            recordHistory(url, cleanTitle, cleanChannel)
-        }
-
-        if (isPlaying && preferences.value.backgroundPlayEnabled) {
-            BackgroundPlaybackService.startOrUpdate(
-                context = getApplication(),
-                title = cleanTitle,
-                channelName = cleanChannel,
-                speedBadge = formatSpeedBadge(preferences.value.playbackSpeed)
-            )
-        }
-    }
-
-    fun onAdOrTrackerBlocked(isVideoAd: Boolean) {
-        _browserState.value = _browserState.value.copy(
-            sessionBlockedCount = _browserState.value.sessionBlockedCount + 1
-        )
-        viewModelScope.launch {
-            prefsRepo.recordAdOrTrackerBlocked(isVideoAd)
-        }
-    }
-
-    // Native / Offline Player Actions
-    fun playDownloadedItem(entity: DownloadEntity) {
-        val file = File(entity.localFilePath)
-        val hasRealLocalVideo = file.exists() && file.length() > 50_000L
-        val uriOrUrl = if (hasRealLocalVideo) {
-            file.absolutePath
-        } else {
-            entity.sourceStreamUrl
-        }
-        val playbackItem = ActivePlaybackItem(
-            id = entity.videoId,
-            title = entity.title,
-            channelName = entity.channelName,
-            mediaUriOrUrl = uriOrUrl,
-            sourcePageUrl = entity.sourcePageUrl,
-            isLocalFile = hasRealLocalVideo,
-            isAudioOnly = entity.isAudioOnly,
-            qualityLabel = entity.qualityBadge,
-            formatContainer = entity.formatContainer,
-            durationSeconds = entity.durationSeconds,
-            thumbnailUrl = entity.thumbnailUrl
-        )
-        _activePlayback.value = playbackItem
-        _isNativeMinimized.value = false
-        _isNativePlaying.value = true
-
-        if (preferences.value.backgroundPlayEnabled) {
-            BackgroundPlaybackService.startOrUpdate(
-                context = getApplication(),
-                title = entity.title,
-                channelName = entity.channelName,
-                speedBadge = formatSpeedBadge(preferences.value.playbackSpeed)
-            )
-        }
-    }
-
-    fun setNativePlaying(playing: Boolean) {
-        _isNativePlaying.value = playing
-        if (!playing && !_browserState.value.isWebVideoPlaying) {
-            BackgroundPlaybackService.stopService(getApplication())
-        }
-    }
-
-    fun toggleMinimizeNativePlayer(minimized: Boolean) {
-        _isNativeMinimized.value = minimized
-    }
-
-    fun closeNativePlayer() {
-        _activePlayback.value = null
-        _isNativePlaying.value = false
-        BackgroundPlaybackService.stopService(getApplication())
-    }
-
-    // Download & Quality Selector Sheet Actions
-    fun openDownloadSheetForCurrentWebVideo() {
-        val bState = _browserState.value
-        val ytVideoId = extractYouTubeVideoId(bState.currentUrl)
-            ?: "yt_${System.currentTimeMillis() % 100000}"
-
-        val thumbUrl = if (!ytVideoId.startsWith("yt_")) {
-            "https://i.ytimg.com/vi/$ytVideoId/hqdefault.jpg"
-        } else {
-            "https://i.ytimg.com/vi/aqz-KE-bpKQ/hqdefault.jpg"
-        }
-
-        val target = DownloadTargetInfo(
-            videoId = ytVideoId,
-            title = bState.detectedVideoTitle.ifBlank { bState.pageTitle.replace(" - YouTube", "") },
-            channelName = bState.detectedVideoChannel.ifBlank { "YouTube" },
-            durationSeconds = bState.detectedVideoDurationSec.coerceAtLeast(180),
-            thumbnailUrl = thumbUrl,
-            sourcePageUrl = bState.currentUrl,
-            directStreamUrl = bState.detectedDirectStreamUrl
-        )
-        _downloadSheetTarget.value = target
-    }
-
-    fun dismissDownloadSheet() {
-        _downloadSheetTarget.value = null
-    }
-
-    fun confirmStartDownload(target: DownloadTargetInfo, formatOption: DownloadFormatOption) {
-        engine.startDownload(target, formatOption)
-        _downloadSheetTarget.value = null
-        showBanner("Downloading '${target.title.take(26)}…' in ${formatOption.qualityBadge} (${formatOption.formatContainer})")
-    }
-
-    fun pauseDownload(id: Long) = engine.pauseDownload(id)
-    fun resumeDownload(id: Long) = engine.resumeDownload(id)
-    fun deleteDownload(entity: DownloadEntity) {
-        engine.deleteDownload(entity)
-        showBanner("Removed '${entity.title.take(24)}' from offline storage")
-    }
-
-    // Playback Speed & Preferences Actions
     fun openSpeedSheet() {
         _showSpeedSheet.value = true
     }
@@ -353,23 +288,25 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         _showSpeedSheet.value = false
     }
 
-    fun setPlaybackSpeed(speed: Float) {
-        val clamped = speed.coerceIn(0.25f, 3.0f)
-        viewModelScope.launch {
-            prefsRepo.setPlaybackSpeed(clamped)
-            if (_isNativePlaying.value || _browserState.value.isWebVideoPlaying) {
-                val activeTitle = _activePlayback.value?.title ?: _browserState.value.detectedVideoTitle
-                val activeChannel = _activePlayback.value?.channelName ?: _browserState.value.detectedVideoChannel
-                if (preferences.value.backgroundPlayEnabled) {
-                    BackgroundPlaybackService.startOrUpdate(
-                        context = getApplication(),
-                        title = activeTitle,
-                        channelName = activeChannel,
-                        speedBadge = formatSpeedBadge(clamped)
-                    )
-                }
-            }
+    fun showBanner(message: String) {
+        bannerJob?.cancel()
+        _statusBanner.value = message
+        bannerJob = viewModelScope.launch {
+            delay(2500L)
+            _statusBanner.value = null
         }
+    }
+
+    fun dismissBanner() {
+        _statusBanner.value = null
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Preferences
+    // ---------------------------------------------------------------------------------------
+
+    fun setPlaybackSpeed(speed: Float) {
+        viewModelScope.launch { prefsRepo.setPlaybackSpeed(speed.coerceIn(0.25f, 3.0f)) }
     }
 
     fun toggleDarkMode(enabled: Boolean) {
@@ -383,33 +320,27 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     fun toggleAdBlock(enabled: Boolean) {
         viewModelScope.launch {
             prefsRepo.setAdBlockEnabled(enabled)
-            showBanner(if (enabled) "Brave Ad-Shield Activated" else "Ad-Shield Paused")
+            showBanner(if (enabled) "Ad shield on" else "Ad shield off (reload to see ads)")
         }
     }
 
     fun toggleSponsorSkip(enabled: Boolean) {
-        viewModelScope.launch { prefsRepo.setSponsorSkipEnabled(enabled) }
+        viewModelScope.launch {
+            prefsRepo.setSponsorSkipEnabled(enabled)
+            val videoId = _videoState.value.videoId
+            if (enabled && videoId.isNotBlank()) loadSponsorSegments(videoId)
+        }
     }
 
     fun toggleBackgroundPlay(enabled: Boolean) {
         viewModelScope.launch {
             prefsRepo.setBackgroundPlayEnabled(enabled)
-            if (!enabled) {
-                BackgroundPlaybackService.stopService(getApplication())
+            if (enabled) {
+                syncBackgroundService(_videoState.value)
             } else {
-                val activeTitle = _activePlayback.value?.title ?: _browserState.value.detectedVideoTitle
-                val activeChannel = _activePlayback.value?.channelName ?: _browserState.value.detectedVideoChannel
-                BackgroundPlaybackService.startOrUpdate(
-                    context = getApplication(),
-                    title = activeTitle,
-                    channelName = activeChannel,
-                    speedBadge = formatSpeedBadge(preferences.value.playbackSpeed)
-                )
+                stopBackgroundSession()
             }
-            showBanner(
-                if (enabled) "Background Playback Enabled (Screen-off audio active)"
-                else "Background Playback Disabled"
-            )
+            showBanner(if (enabled) "Background play on" else "Background play off")
         }
     }
 
@@ -421,21 +352,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch { prefsRepo.setRememberSpeed(enabled) }
     }
 
-    fun setDefaultDownloadQuality(optionId: String) {
-        viewModelScope.launch { prefsRepo.setDefaultQualityOptionId(optionId) }
-    }
+    // ---------------------------------------------------------------------------------------
+    // Bookmarks & history
+    // ---------------------------------------------------------------------------------------
 
     fun addCurrentPageBookmark() {
-        val b = _browserState.value
+        val page = _browserState.value
+        val video = _videoState.value
+        val onVideo = video.videoId.isNotBlank() && page.url.contains(video.videoId)
+        val title = (if (onVideo) video.title else page.title.removeSuffix(" - YouTube"))
+            .ifBlank { "YouTube" }
+            .take(40)
         viewModelScope.launch {
             database.bookmarkDao().insertBookmark(
-                BookmarkEntity(
-                    title = b.detectedVideoTitle.ifBlank { b.pageTitle }.take(50),
-                    url = b.currentUrl,
-                    category = "Saved"
-                )
+                BookmarkEntity(title = title, url = page.url, category = "Saved")
             )
-            showBanner("Saved to Quick Bookmarks")
+            showBanner("Bookmarked")
         }
     }
 
@@ -461,5 +393,14 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
                 )
             )
         }
+    }
+
+    override fun onCleared() {
+        // Best effort: persist counts that have not been flushed yet.
+        val snapshot = pendingCounts.value
+        if (snapshot.ads > 0L || snapshot.requests > 0L) {
+            kotlinx.coroutines.runBlocking { prefsRepo.addBlockedCounts(snapshot.ads, snapshot.requests) }
+        }
+        super.onCleared()
     }
 }

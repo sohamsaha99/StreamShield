@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar" />
+    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar">
+        <!-- Matches the default dark UI so launch and PiP transitions do not flash white. -->
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

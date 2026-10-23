@@ -1,6 +1,6 @@
 {
   "name": "StreamShield",
-  "description": "Ad-blocking YouTube browser and offline video downloader with background playback, customizable playback speed, multi-format quality optimization, and Picture-in-Picture mode.",
+  "description": "Ad-blocking YouTube browser with background playback, lock-screen controls, custom playback speed, SponsorBlock skipping, fullscreen and Picture-in-Picture.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

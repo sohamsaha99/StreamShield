@@ -1,19 +1,5 @@
 <resources>
     <string name="app_name">StreamShield</string>
-    <string name="nav_browser">Brave Tube</string>
-    <string name="nav_discover">Discover</string>
-    <string name="nav_downloads">Downloads</string>
-    <string name="nav_shields">Shields &amp; Speed</string>
-    <string name="omnibox_hint">Search YouTube or paste video URL…</string>
-    <string name="shield_active">Shield Active</string>
-    <string name="bg_play_active">Background Play ON</string>
-    <string name="pip_mode_action">Picture-in-Picture</string>
-    <string name="download_video_action">Download Video</string>
-    <string name="playback_speed_label">Playback Speed</string>
-    <string name="quality_selector_title">Select Quality &amp; Format</string>
-    <string name="storage_optimizer_subtitle">Optimize file size for offline storage</string>
-    <string name="empty_downloads_title">No Offline Videos Yet</string>
-    <string name="empty_downloads_subtitle">Browse YouTube or Discover streams and tap Download to save videos in MP4, WebM, or Audio-only M4A/Opus formats.</string>
-    <string name="channel_bg_playback_name">Background Audio Playback</string>
-    <string name="channel_bg_playback_desc">Keeps video and audio playing when screen is off or in background</string>
+    <string name="channel_bg_playback_name">Background playback</string>
+    <string name="channel_bg_playback_desc">Playback controls while YouTube plays in the background</string>
 </resources>
