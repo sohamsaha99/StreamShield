@@ -23,6 +23,17 @@ object AdBlockShieldEngine {
         )
     }
 
+    fun createScriptResponse(script: String): WebResourceResponse {
+        return WebResourceResponse(
+            "application/javascript",
+            "UTF-8",
+            200,
+            "OK",
+            mapOf("Access-Control-Allow-Origin" to "*"),
+            ByteArrayInputStream(script.toByteArray())
+        )
+    }
+
     /** The page script (assets/shield.js), read once and cached. */
     fun shieldScript(context: Context): String {
         cachedScript?.let { return it }

@@ -312,6 +312,8 @@ fun StreamShieldApp(
     val browserState by viewModel.browserState.collectAsStateWithLifecycle()
     val omniboxInput by viewModel.omniboxInput.collectAsStateWithLifecycle()
     val blockCounts by viewModel.blockCounts.collectAsStateWithLifecycle()
+    val lastStart by viewModel.lastStart.collectAsStateWithLifecycle()
+    val recentBlocked by viewModel.recentBlocked.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val watchHistory by viewModel.watchHistory.collectAsStateWithLifecycle()
     val showSettings by viewModel.showSettings.collectAsStateWithLifecycle()
@@ -362,6 +364,8 @@ fun StreamShieldApp(
                 SettingsScreen(
                     preferences = preferences,
                     blockCounts = blockCounts,
+                    lastStart = lastStart,
+                    recentBlocked = recentBlocked,
                     bookmarks = bookmarks,
                     watchHistory = watchHistory,
                     onClose = viewModel::closeSettings,

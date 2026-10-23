@@ -57,6 +57,14 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `ad blocker check script gets a stand-in instead of being blocked`() {
+        val url = "https://static.doubleclick.net/instream/ad_status.js"
+        assertEquals("window.google_ad_status = 1;", RequestFilter.surrogateFor(url, true))
+        assertNull(RequestFilter.surrogateFor(url, false))
+        assertNull(RequestFilter.surrogateFor("https://static.doubleclick.net/other.js", true))
+    }
+
+    @Test
     fun `request filter is off when ad block is disabled`() {
         assertNull(RequestFilter.evaluate("https://m.youtube.com/api/stats/ads", false))
         assertNull(RequestFilter.evaluate("https://ad.doubleclick.net/x", false))

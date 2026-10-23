@@ -164,6 +164,7 @@
             adsRemoved += stripAdRenderers(obj, 0);
         }
         if (adsRemoved > 0) {
+            diag.pruned += adsRemoved;
             report('onAdBlocked', 'prune');
         }
         return obj;
@@ -294,20 +295,20 @@
         '.ytm-promoted-sparkles-web-renderer'
     ].join(',\n') + ' { display: none !important; }';
 
+    // Kept as in the original app (known to work in Android PiP): everything but the player is
+    // hidden and both the player and the <video> are pinned to the viewport.
     var PIP_CSS = [
-        'html, body { overflow: hidden !important; background: #000 !important; }',
-        'ytm-mobile-topbar-renderer, #header-bar, ytm-pivot-bar-renderer, .mobile-topbar-header,',
-        'ytm-single-column-watch-next-results-renderer, ytm-watch-metadata-app-promo-renderer,',
-        '.player-controls-content, #player-control-overlay, .ytp-chrome-top, .ytp-chrome-bottom',
-        '{ display: none !important; }',
-        '#player-container-id, #player, #movie_player, .html5-video-player {',
-        '  position: fixed !important; inset: 0 !important; width: 100vw !important;',
-        '  height: 100vh !important; max-height: 100vh !important; margin: 0 !important;',
-        '  padding: 0 !important; z-index: 2147483646 !important; background: #000 !important; }',
-        '#movie_player video, .html5-video-player video, .html5-main-video {',
-        '  position: absolute !important; inset: 0 !important; width: 100% !important;',
-        '  height: 100% !important; left: 0 !important; top: 0 !important;',
-        '  object-fit: contain !important; }'
+        'html, body { overflow: hidden !important; background: #000 !important;',
+        '  margin: 0 !important; padding: 0 !important; }',
+        'ytm-mobile-topbar-renderer, #header-bar, .player-controls-content, #player-control-overlay,',
+        '.ytp-chrome-top, .ytp-chrome-bottom, ytm-single-column-watch-next-results-renderer,',
+        'ytm-item-section-renderer, ytm-comments-entry-point-header-renderer',
+        '{ display: none !important; opacity: 0 !important; }',
+        '#player-container-id, #player, #movie_player, .html5-video-player, .html5-main-video, video {',
+        '  position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important;',
+        '  bottom: 0 !important; width: 100vw !important; height: 100vh !important;',
+        '  max-width: 100vw !important; max-height: 100vh !important; z-index: 2147483647 !important;',
+        '  background: #000 !important; object-fit: contain !important; }'
     ].join('\n');
 
     function ensureStyle(id, css, enabled) {
@@ -343,6 +344,11 @@
     var savedMuted = false;
     var settingRate = false;
     var lastLoadAt = 0;
+    var userPaused = false;      // pause requested by the user through the app (notification, PiP button)
+    var pipKeeper = null;
+    var adTimer = null;
+    // Start-up diagnostics for the current video (shown in the app's settings).
+    var diag = { videoId: '', navAt: Date.now() - Math.round((window.performance && performance.now()) || 0), startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
     var sponsor = { videoId: '', segments: [] };
     var lastStateJson = '';
 
@@ -391,6 +397,10 @@
 
     function fastForwardAd() {
         var video = findVideo();
+        var player = hookedPlayer || findPlayer();
+        if (player && typeof player.skipAd === 'function') {
+            try { player.skipAd(); } catch (e) {}
+        }
         clickSkipButtons();
         if (!video) return;
         video.muted = true;
@@ -405,14 +415,19 @@
         var showing = config.adBlock && isAdShowing(hookedPlayer);
         if (showing && !adActive) {
             adActive = true;
+            diag.adSince = Date.now();
             var video = findVideo();
             savedMuted = video ? video.muted : false;
             report('onAdBlocked', 'skip');
             fastForwardAd();
+            // Media events can stall while an ad loads; keep nudging, but only while it lasts.
+            if (!adTimer) adTimer = setInterval(fastForwardAd, 100);
         } else if (showing) {
             fastForwardAd();
         } else if (!showing && adActive) {
             adActive = false;
+            if (adTimer) { clearInterval(adTimer); adTimer = null; }
+            if (diag.adSince) { diag.adMs += Date.now() - diag.adSince; diag.adSince = 0; }
             var v = findVideo();
             if (v) {
                 v.muted = savedMuted;
@@ -460,7 +475,12 @@
             duration: video && isFinite(video.duration) ? Math.round(video.duration) : 0,
             playing: playing,
             width: video ? video.videoWidth : 0,
-            height: video ? video.videoHeight : 0
+            height: video ? video.videoHeight : 0,
+            // Start-up diagnostics: ms from navigation to first frame, ms spent in ad state,
+            // ad entries removed from YouTube's responses.
+            startMs: diag.startMs,
+            adMs: diag.adMs,
+            pruned: diag.pruned
         };
         var json = JSON.stringify(state);
         if (!force && json === lastStateJson) return;
@@ -473,13 +493,31 @@
         hookedVideo = video;
         video.addEventListener('loadedmetadata', function () {
             lastLoadAt = Date.now();
+            trackNavigation();
             applySpeed();
             onAdStateChanged();
             reportState();
         });
         video.addEventListener('durationchange', function () { if (adActive) fastForwardAd(); });
-        video.addEventListener('playing', function () { applySpeed(); reportState(); });
-        video.addEventListener('pause', function () { reportState(); });
+        video.addEventListener('playing', function () {
+            userPaused = false;
+            var id = currentVideoId();
+            if (id && diag.videoId === id && diag.startMs < 0 && !adActive) {
+                diag.startMs = Date.now() - diag.navAt;
+            }
+            applySpeed();
+            reportState();
+        });
+        video.addEventListener('pause', function () {
+            reportState();
+            // Something (YouTube or the WebView) pauses video in the PiP window; the user can only
+            // pause there through the app's button, which sets userPaused.
+            if (config.pip && !userPaused && !video.ended) {
+                setTimeout(function () {
+                    if (config.pip && !userPaused && video.paused && !video.ended) video.play().catch(function () {});
+                }, 60);
+            }
+        });
         video.addEventListener('ended', function () { reportState(); });
         video.addEventListener('ratechange', function () {
             if (settingRate || adActive || Math.abs(video.playbackRate - config.speed) < 0.01) return;
@@ -518,7 +556,25 @@
         if (video) hookVideo(video);
     }
 
+    function trackNavigation() {
+        var id = currentVideoId();
+        if (!id || id === diag.videoId) return;
+        if (!diag.videoId) {
+            // First video since a navigation start (or page load): keep its start time and the
+            // ads pruned from responses fetched on the way.
+            diag.videoId = id;
+        } else {
+            // Video changed without a navigation event (e.g. autoplay): start timing now.
+            diag = { videoId: id, navAt: Date.now(), startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
+        }
+    }
+
+    function markNavigationStart() {
+        diag = { videoId: '', navAt: Date.now(), startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
+    }
+
     function tick() {
+        trackNavigation();
         applyStyles();
         hookPlayer();
         reportState();
@@ -531,6 +587,14 @@
         ['yt-navigate-finish', 'state-navigateend', 'yt-page-data-updated', 'popstate'].forEach(function (type) {
             window.addEventListener(type, function () { setTimeout(tick, 50); });
         });
+        ['yt-navigate-start', 'state-navigatestart'].forEach(function (type) {
+            window.addEventListener(type, markNavigationStart);
+        });
+        // Clicks on links inside YouTube's SPA: start timing from the tap.
+        document.addEventListener('click', function (e) {
+            var a = e.target && e.target.closest && e.target.closest('a[href*="watch?v="], a[href*="/shorts/"]');
+            if (a) markNavigationStart();
+        }, true);
         setInterval(tick, 1500);
     }
 
@@ -578,7 +642,19 @@
             if (wasPip !== config.pip) {
                 if (config.pip) {
                     var v = findVideo();
-                    if (v && v.paused && !v.ended && !adActive) v.play().catch(function () {});
+                    if (v && v.paused && !v.ended && !adActive && !userPaused) v.play().catch(function () {});
+                    // Backstop for pauses that do not fire a 'pause' event (cheap; PiP only).
+                    if (!pipKeeper) {
+                        pipKeeper = setInterval(function () {
+                            var pv = findVideo();
+                            if (config.pip && !userPaused && pv && pv.paused && !pv.ended && pv.readyState >= 2) {
+                                pv.play().catch(function () {});
+                            }
+                        }, 500);
+                    }
+                } else if (pipKeeper) {
+                    clearInterval(pipKeeper);
+                    pipKeeper = null;
                 }
                 nudgeLayout();
             }
@@ -588,17 +664,25 @@
             sponsor = { videoId: String(videoId || ''), segments: Array.isArray(segments) ? segments : [] };
         },
         play: function () {
+            userPaused = false;
             var v = findVideo();
             if (v) v.play().catch(function () {});
         },
         pause: function () {
+            userPaused = true;
             var v = findVideo();
             if (v) v.pause();
         },
         togglePlay: function () {
             var v = findVideo();
             if (!v) return;
-            if (v.paused) v.play().catch(function () {}); else v.pause();
+            if (v.paused) {
+                userPaused = false;
+                v.play().catch(function () {});
+            } else {
+                userPaused = true;
+                v.pause();
+            }
         },
         exitFullscreen: function () {
             try {

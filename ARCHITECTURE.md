@@ -91,7 +91,11 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
    - speed enforcement;
    - SponsorBlock segment skipping on `timeupdate`;
    - state reporting (sent only when the state changes);
-   - a 1.5 s heartbeat that re-finds the player after single-page navigation.
+   - a 1.5 s heartbeat that re-finds the player after single-page navigation;
+   - a PiP keep-playing guard: in PiP, any pause the user did not request through the app is
+     undone, using the `pause` event plus a 500 ms check that runs only in PiP;
+   - start-up diagnostics (time to first frame, time in ad state, ads removed), sent with the
+     state report and shown in Settings → Diagnostics.
 5. **Native → page API:** `window.__streamShield.setConfig`, `setSponsorSegments`, `play`, `pause`,
    `togglePlay`, `exitFullscreen`, `nudgeLayout`.
 
@@ -103,7 +107,9 @@ main thread.
 ### `engine/`
 - `RequestFilter.kt`: pure Kotlin. Matches the host (walking up parent domains in hash sets) and,
   for YouTube/Google hosts, the path (`/pagead/`, `/api/stats/ads`, …). It must stay cheap
-  because it runs for every request.
+  because it runs for every request. `surrogateFor` answers ad-blocker check scripts
+  (`static.doubleclick.net/instream/ad_status.js`) with a harmless stand-in instead of blocking
+  them, as uBlock Origin does.
 - `AdBlockShieldEngine.kt`: the empty 204 response for blocked requests, cached loading of
   `shield.js`, and the config JSON sent to the page.
 - `SponsorBlockClient.kt`: fetches skip segments from `sponsor.ajay.app` and parses them. It sends

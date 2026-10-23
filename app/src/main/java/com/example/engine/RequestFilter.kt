@@ -61,6 +61,19 @@ object RequestFilter {
         "/ptracking"
     )
 
+    /**
+     * Scripts that pages use to detect ad blockers get a harmless stand-in instead of an empty
+     * response (as uBlock Origin does). YouTube loads ad_status.js and checks that it set
+     * `google_ad_status`; an empty response tells it an ad blocker is active.
+     */
+    fun surrogateFor(url: String, adBlockEnabled: Boolean): String? {
+        if (!adBlockEnabled) return null
+        if (hostOf(url) == "static.doubleclick.net" && pathOf(url) == "/instream/ad_status.js") {
+            return "window.google_ad_status = 1;"
+        }
+        return null
+    }
+
     fun evaluate(url: String, adBlockEnabled: Boolean): BlockKind? {
         if (!adBlockEnabled) return null
         val host = hostOf(url) ?: return null

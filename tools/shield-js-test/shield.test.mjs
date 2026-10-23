@@ -73,6 +73,7 @@ function watchPage() {
   window.__visibilityEvents = 0;
   window.__inputBlurEvents = 0;
   window.__resizeEvents = 0;
+  window.__skipAdCalls = 0;
   document.addEventListener('visibilitychange', function () { window.__visibilityEvents++; });
   window.addEventListener('resize', function () { window.__resizeEvents++; });
 </script>
@@ -85,7 +86,8 @@ function watchPage() {
 <ytm-promoted-sparkles-web-renderer id="feedAd">Sponsored</ytm-promoted-sparkles-web-renderer>
 <ytm-rich-item-renderer id="realItem">Real video</ytm-rich-item-renderer>
 <input id="search"><button id="other">x</button>
-<script>document.getElementById('search').addEventListener('blur', function () { window.__inputBlurEvents++; });</script>
+<script>document.getElementById('search').addEventListener('blur', function () { window.__inputBlurEvents++; });
+document.getElementById('movie_player').skipAd = function () { window.__skipAdCalls++; };</script>
 </body></html>`;
 }
 
@@ -252,6 +254,7 @@ console.log('Ad fallback (ad still starts)');
         return { muted: v.muted, rate: v.playbackRate, t: v.currentTime, d: v.duration };
     });
     check('ad is muted', during.muted === true, during);
+    check("player's own skipAd() is used", (await page.evaluate(() => window.__skipAdCalls)) > 0);
     check('ad is fast-forwarded to its end', during.d - during.t < 0.5, during);
     const skips = (await adEvents(page)).filter((k) => k === 'skip').length;
     check('one ad counts once despite many class mutations', skips === 1, skips);
@@ -270,6 +273,11 @@ console.log('Ad fallback (ad still starts)');
     });
     check('sound restored after the ad', after.muted === false, after);
     check('speed restored after the ad', Math.abs(after.rate - 1.25) < 0.01, after);
+    const callsAfterAd = await page.evaluate(() => window.__skipAdCalls);
+    await sleep(400);
+    check('ad nudging stops once the ad is over', (await page.evaluate(() => window.__skipAdCalls)) === callsAfterAd);
+    const adDiag = await page.evaluate(() => { window.__streamShield.reportState(); return window.__bridgeLog.filter((e) => e[0] === 'state').pop()[1]; });
+    check('diagnostics record time spent in the ad state', adDiag.adMs >= 100, adDiag);
 
     await page.evaluate(() => window.__streamShield.setConfig({ adBlock: false }));
     await page.evaluate(() => document.getElementById('movie_player').classList.add('ad-showing'));
@@ -347,6 +355,7 @@ console.log('Speed, SponsorBlock, state reporting');
     check('state reports video id, title, channel, dimensions', last.videoId === 'abc123def45' && last.title === 'Test video' &&
         last.channel === 'Test Channel' && last.width === 320 && last.height === 180 && last.playing === true, last);
     check('state is only reported on change (not every tick)', states.length <= 8, states.length);
+    check('diagnostics: start time and ads removed are reported', last.startMs >= 0 && last.startMs < 10000 && last.pruned >= 1, last);
 
     await page.evaluate(() => window.__streamShield.pause());
     await sleep(150);
@@ -369,6 +378,20 @@ console.log('Picture-in-picture layout');
         return { style: !!document.getElementById('streamshield-pip'), w: p.width, h: p.height, top: p.top };
     });
     check('PiP style fills the window with the player', inPip.style && inPip.w === 400 && inPip.h === 225 && inPip.top === 0, inPip);
+    const videoBox = await page.evaluate(() => { const r = document.querySelector('video').getBoundingClientRect(); return { w: r.width, h: r.height }; });
+    check('PiP: the video itself fills the window', videoBox.w === 400 && videoBox.h === 225, videoBox);
+
+    await page.evaluate(() => document.querySelector('video').play());
+    await sleep(200);
+    await page.evaluate(() => document.querySelector('video').pause()); // YouTube/WebView pausing it
+    await sleep(300);
+    check('PiP: a pause the user did not ask for is undone', await page.evaluate(() => !document.querySelector('video').paused));
+    await page.evaluate(() => window.__streamShield.togglePlay()); // the PiP window's pause button
+    await sleep(1200);
+    check("PiP: the user's own pause is respected", await page.evaluate(() => document.querySelector('video').paused));
+    await page.evaluate(() => window.__streamShield.togglePlay());
+    await sleep(300);
+    check('PiP: play button resumes', await page.evaluate(() => !document.querySelector('video').paused));
 
     await page.setViewportSize({ width: 412, height: 800 });
     await page.evaluate(() => { window.__resizeEvents = 0; window.__streamShield.setConfig({ pip: false }); });

@@ -53,6 +53,16 @@ class KeepAliveWebView(context: Context) : WebView(context) {
         }
     }
 
+    // Chromium treats a WebView whose view (or an ancestor) is not VISIBLE as hidden and pauses
+    // its video; keep reporting VISIBLE while playback should continue.
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        if (keepAlive && visibility != View.VISIBLE) {
+            super.onVisibilityChanged(changedView, View.VISIBLE)
+        } else {
+            super.onVisibilityChanged(changedView, visibility)
+        }
+    }
+
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(if (keepAlive) true else hasWindowFocus)
     }
@@ -190,6 +200,12 @@ class BrowserController(
         activity.lifecycleScope.launch {
             combine(viewModel.preferences, viewModel.isInPipMode) { prefs, pip ->
                 webView.keepAlive = prefs.backgroundPlayEnabled || pip
+                if (pip) {
+                    // As the original app did: make sure Chromium's media pipeline and timers run
+                    // in the PiP window.
+                    webView.onResume()
+                    webView.resumeTimers()
+                }
                 AdBlockShieldEngine.configJson(prefs, pip)
             }.distinctUntilChanged().collect { pushConfig(it) }
         }
@@ -279,8 +295,13 @@ class BrowserController(
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
             if (request == null || request.isForMainFrame) return null
             val adBlock = viewModel.preferences.value.adBlockEnabled
-            RequestFilter.evaluate(request.url.toString(), adBlock) ?: return null
-            viewModel.onRequestBlocked()
+            val url = request.url.toString()
+            RequestFilter.surrogateFor(url, adBlock)?.let { script ->
+                viewModel.onRequestBlocked(url)
+                return AdBlockShieldEngine.createScriptResponse(script)
+            }
+            RequestFilter.evaluate(url, adBlock) ?: return null
+            viewModel.onRequestBlocked(url)
             return AdBlockShieldEngine.createEmptyResponse()
         }
 
@@ -417,7 +438,10 @@ class BrowserController(
                     durationSec = o.optInt("duration"),
                     isPlaying = o.optBoolean("playing"),
                     videoWidth = o.optInt("width"),
-                    videoHeight = o.optInt("height")
+                    videoHeight = o.optInt("height"),
+                    startMs = o.optInt("startMs", -1),
+                    adMs = o.optInt("adMs"),
+                    adsPruned = o.optInt("pruned")
                 )
             } catch (_: Exception) {
                 null

@@ -43,6 +43,15 @@ data class BlockCounts(val ads: Long = 0L, val requests: Long = 0L)
 
 data class SponsorSegments(val videoId: String, val json: String)
 
+/** How the most recent video started; shown in Settings to diagnose slow starts. */
+data class StartDiagnostics(
+    val title: String,
+    val startMs: Int,
+    val adMs: Int,
+    val adsPruned: Int,
+    val adBlockEnabled: Boolean
+)
+
 class StreamShieldViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = StreamShieldDatabase.getInstance(application)
@@ -81,6 +90,13 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     private val _isInPipMode = MutableStateFlow(false)
     val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
+
+    private val _lastStart = MutableStateFlow<StartDiagnostics?>(null)
+    val lastStart: StateFlow<StartDiagnostics?> = _lastStart.asStateFlow()
+
+    // Most recent blocked requests (host + path), newest first.
+    private val _recentBlocked = MutableStateFlow<List<String>>(emptyList())
+    val recentBlocked: StateFlow<List<String>> = _recentBlocked.asStateFlow()
 
     private val _sponsorSegments = MutableStateFlow<SponsorSegments?>(null)
     val sponsorSegments: StateFlow<SponsorSegments?> = _sponsorSegments.asStateFlow()
@@ -160,6 +176,16 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         val previous = _videoState.value
         _videoState.value = state
 
+        if (state.startMs >= 0 && (state.videoId != previous.videoId || previous.startMs < 0)) {
+            _lastStart.value = StartDiagnostics(
+                title = state.title,
+                startMs = state.startMs,
+                adMs = state.adMs,
+                adsPruned = state.adsPruned,
+                adBlockEnabled = preferences.value.adBlockEnabled
+            )
+        }
+
         if (state.videoId.isNotBlank() && state.videoId != previous.videoId) {
             val prefs = preferences.value
             if (!prefs.rememberSpeedAcrossVideos && previous.videoId.isNotBlank() && prefs.playbackSpeed != 1.0f) {
@@ -192,8 +218,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     // Ad-block counters (called from WebView threads)
     // ---------------------------------------------------------------------------------------
 
-    /** An ad/tracker network request was refused. */
-    fun onRequestBlocked() {
+    /** An ad/tracker network request was refused (called on WebView network threads). */
+    fun onRequestBlocked(url: String) {
+        val entry = url.substringBefore('?').removePrefix("https://").removePrefix("http://").take(90)
+        _recentBlocked.update { (listOf(entry) + it).take(12) }
         pendingCounts.update { it.copy(requests = it.requests + 1) }
         scheduleCountFlush()
     }

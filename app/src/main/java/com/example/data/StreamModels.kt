@@ -15,7 +15,13 @@ data class WebVideoState(
     val durationSec: Int = 0,
     val isPlaying: Boolean = false,
     val videoWidth: Int = 0,
-    val videoHeight: Int = 0
+    val videoHeight: Int = 0,
+    /** Milliseconds from navigation to the first frame, or -1 until the video has started. */
+    val startMs: Int = -1,
+    /** Milliseconds the player spent in an ad state while starting this video. */
+    val adMs: Int = 0,
+    /** Ad entries removed from YouTube's responses for this video. */
+    val adsPruned: Int = 0
 )
 
 fun extractYouTubeVideoId(url: String): String? {

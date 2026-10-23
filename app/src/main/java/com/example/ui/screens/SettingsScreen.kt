@@ -55,6 +55,8 @@ import com.example.data.WatchHistoryEntity
 import com.example.data.formatCount
 import com.example.data.formatSpeedBadge
 import com.example.ui.BlockCounts
+import com.example.ui.StartDiagnostics
+import java.util.Locale
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.EmeraldSafe
 import com.example.ui.theme.ShieldCoral
@@ -63,6 +65,8 @@ import com.example.ui.theme.ShieldCoral
 fun SettingsScreen(
     preferences: ShieldPreferencesState,
     blockCounts: BlockCounts,
+    lastStart: StartDiagnostics?,
+    recentBlocked: List<String>,
     bookmarks: List<BookmarkEntity>,
     watchHistory: List<WatchHistoryEntity>,
     onClose: () -> Unit,
@@ -133,6 +137,10 @@ fun SettingsScreen(
                             testTag = "setting_sponsor_skip_switch"
                         )
                     }
+                }
+
+                item {
+                    DiagnosticsCard(lastStart = lastStart, recentBlocked = recentBlocked)
                 }
 
                 item {
@@ -271,6 +279,64 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+/** What happened while the last video started: helps tell ad-related delays from other ones. */
+@Composable
+private fun DiagnosticsCard(lastStart: StartDiagnostics?, recentBlocked: List<String>) {
+    SettingsSectionCard(title = "Diagnostics") {
+        if (lastStart == null) {
+            Text(
+                text = "Play a video to see how long it took to start.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            Text(
+                text = lastStart.title.ifBlank { "Last video" },
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            DiagnosticLine("Time to start", String.format(Locale.US, "%.1f s", lastStart.startMs / 1000.0))
+            DiagnosticLine("Ad shield", if (lastStart.adBlockEnabled) "on" else "off")
+            DiagnosticLine("Ads removed before playback", lastStart.adsPruned.toString())
+            DiagnosticLine(
+                "Time in ad state",
+                if (lastStart.adMs > 0) String.format(Locale.US, "%.1f s", lastStart.adMs / 1000.0) else "none"
+            )
+        }
+        if (recentBlocked.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Recently blocked requests",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            recentBlocked.take(8).forEach { entry ->
+                Text(
+                    text = entry,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticLine(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
+        )
+        Text(text = value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
     }
 }
 
