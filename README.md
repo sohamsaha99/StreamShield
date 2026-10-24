@@ -32,6 +32,19 @@ The repository has `gradle/wrapper/gradle-wrapper.properties` but no `gradlew` s
 `gradle wrapper` once, or open the project in Android Studio. Release signing reads
 `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from the environment.
 
+### Local development in Docker
+
+The `Dockerfile` provides the full toolchain: JDK 17, Gradle, the Android SDK, an Android 15
+emulator, Node, Playwright and Claude Code. See
+[docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md) for how to start it, run the emulator, inspect the
+YouTube page over CDP, and what to test.
+
+```sh
+docker build -t streamshield-dev --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
+docker run -it --rm --device /dev/kvm --network host -v "$PWD":/workspace streamshield-dev
+tools/dev-setup.sh && ./gradlew assembleDebug testDebugUnitTest      # inside the container
+```
+
 ### Build on GitHub
 
 `.github/workflows/build-apk.yml` builds a debug APK on every push to `main`, on pull requests,

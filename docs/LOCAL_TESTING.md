@@ -1,0 +1,218 @@
+# Local testing guide
+
+How to build StreamShield in the Docker dev environment, and what an AI agent (or a person)
+should test once there is real internet access, including YouTube. Read
+[ARCHITECTURE.md](../ARCHITECTURE.md) and [AGENTS.md](../AGENTS.md) first.
+
+So far the app has only been tested in two ways: `shield.js` against **mock** YouTube pages in
+headless Chromium, and by the owner on a phone. Everything YouTube-specific below is the part
+that still needs checking against the real site.
+
+---
+
+## 1. Start the container
+
+Build once (5–15 min; about 6 GB with the emulator):
+
+```sh
+docker build -t streamshield-dev \
+  --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
+# Apple Silicon / no emulator wanted:
+docker build -t streamshield-dev --build-arg INSTALL_EMULATOR=false .
+```
+
+Run it with the repository mounted.
+
+**Linux with KVM.** The emulator works inside the container. `--network host` makes the
+emulator reachable from the host, so you can watch it with `scrcpy`.
+
+```sh
+docker run -it --rm --name streamshield \
+  --device /dev/kvm --network host \
+  -v "$PWD":/workspace \
+  -v streamshield-gradle:/home/dev/.gradle \
+  streamshield-dev
+```
+
+**macOS / Windows (Docker Desktop has no KVM).** Run an emulator on the host, or use a phone, and
+let the container use the host's adb server:
+
+```sh
+adb kill-server && adb -a nodaemon server start &      # on the host, listens on all interfaces
+docker run -it --rm --name streamshield \
+  -e ADB_SERVER_SOCKET=tcp:host.docker.internal:5037 \
+  -v "$PWD":/workspace -v streamshield-gradle:/home/dev/.gradle \
+  streamshield-dev
+```
+
+To use a phone over Wi-Fi from either setup, turn on Wireless debugging on the phone and run
+`adb pair <ip>:<port>`, then `adb connect <ip>:<port>`.
+
+To use Claude Code inside the container, pass your credentials (for example
+`-e ANTHROPIC_API_KEY`) or log in with `claude` after starting.
+
+## 2. First build
+
+```sh
+tools/dev-setup.sh                      # debug.keystore, local.properties, gradlew (once)
+./gradlew assembleDebug testDebugUnitTest
+NODE_PATH=$(npm root -g) node tools/shield-js-test/shield.test.mjs
+```
+
+All three must pass before and after every change.
+
+## 3. Emulator and app
+
+```sh
+emulator -avd streamshield -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot &
+adb wait-for-device
+adb shell 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done'
+./gradlew installDebug
+adb shell am start -n com.aistudio.streamshield.vqxkpl/com.example.MainActivity
+```
+
+- **App id:** `com.aistudio.streamshield.vqxkpl`. **Activity:** `com.example.MainActivity`.
+- **Opening a video directly:**
+  `adb shell am start -a android.intent.action.VIEW -d "https://m.youtube.com/watch?v=<id>"`.
+- **Screenshots:** `adb exec-out screencap -p > /tmp/shot.png`.
+- **UI tree:** `adb shell uiautomator dump /sdcard/ui.xml && adb pull /sdcard/ui.xml /tmp/`.
+- **Logs:** `adb logcat chromium:I *:S` shows the page's console output (`[INFO:CONSOLE…]`).
+- **WebView version:** check with `adb shell dumpsys webviewupdate`. `shield.js` needs the
+  document-start-script feature, which recent WebViews have; note the version in your report.
+- **Audio:** `-no-audio` means you can't listen. Judge playback from the page state (section 4)
+  and `adb shell dumpsys media_session`.
+
+## 4. Look inside the YouTube page (CDP)
+
+Debug builds allow WebView inspection (`BrowserController.configureWebView`). Forward the
+DevTools socket and drive the page with Playwright:
+
+```sh
+PID=$(adb shell pidof com.aistudio.streamshield.vqxkpl)
+adb forward tcp:9222 localabstract:webview_devtools_remote_$PID
+```
+
+```js
+// probe.mjs:  NODE_PATH=$(npm root -g) node probe.mjs
+import { createRequire } from 'node:module';
+const { chromium } = createRequire(import.meta.url)('playwright');
+const browser = await chromium.connectOverCDP('http://localhost:9222');
+const page = browser.contexts()[0].pages().find((p) => p.url().includes('youtube.com'));
+console.log(await page.evaluate(() => {
+  const v = document.querySelector('video');
+  return {
+    url: location.href,
+    shield: !!window.__streamShield,
+    config: window.__streamShield && window.__streamShield.getConfig(),
+    paused: v && v.paused, time: v && v.currentTime, duration: v && v.duration,
+    playerClass: document.getElementById('movie_player')?.className
+  };
+}));
+await browser.close();   // detaches only; the app keeps running
+```
+
+Useful page-side hooks (see `window.__streamShield` in `shield.js`):
+- `__streamShield.getConfig()` and `__streamShield.reportState()`;
+- `__streamShield.internals.nextByVideo`: what plays next, per video;
+- `HTMLMediaElement` events: attach `pause` / `waiting` / `playing` listeners to count
+  interruptions over time.
+
+Playwright's CDP `Network` domain, or `page.on('request')` after connecting, shows which requests
+the player is waiting on. The app's own `shouldInterceptRequest` blocks are listed in
+**Settings → Diagnostics**.
+
+**Without a device**, `shield.js` can be checked against the real site in desktop Chromium with
+mobile emulation:
+`chromium.launch()` → `newContext({ ...devices['Pixel 7'] })` →
+`addInitScript(shield.js)` → `goto('https://m.youtube.com/watch?v=…')`.
+This covers ad pruning and player hooks, but not Android behaviour (PiP, background, service).
+
+## 5. What to test
+
+Record pass/fail, numbers and screenshots for each item. Items marked **(open)** were reported
+by the owner or never verified; prioritise them.
+
+### A. Ad blocking
+1. **Pre-roll.** Open 10 different popular videos. No ad plays, and Diagnostics shows "Time in
+   ad state: none".
+2. **Mid-rolls and in-video ads (open, never checked).** Play a long video (>20 min) and seek past
+   typical mid-roll points. No ad plays; if one does, record `#movie_player` classes and what
+   `ad-showing` did.
+3. **Feed, search, Shorts.** No promoted cards in the home feed or search results, and no ads
+   while swiping through Shorts.
+4. **No anti-adblock dialog** ("Ad blockers are not allowed") after 20+ videos.
+5. **Start delay (open; owner measured 5–6 s, accepted for now).**
+   - Compare "Video data loaded" and "Playback started" with the shield on and off, 5 videos each.
+   - With CDP, find what happens between `loadedmetadata` and `playing`: requests the player
+     waits on, and timers.
+   - Compare with the same videos in Chrome on the same device.
+   - If the gap is caused by the shield, find the rule responsible (try disabling network
+     blocking and JSON pruning separately) before changing anything.
+6. **Counters** go up once per ad and stay reasonable: no jumps of hundreds.
+
+### B. Playback controls
+1. Speed sheet: the speed applies immediately and persists to the next video. With "Lock speed"
+   off, it resets to 1.0x.
+2. Changing speed in YouTube's own menu is adopted by the app's speed pill.
+3. SponsorBlock: on a video with known segments, the segment is skipped and a banner shows.
+
+### C. Fullscreen
+1. YouTube's fullscreen button: immersive mode; landscape for landscape videos; Back exits;
+   the player is not cropped afterwards.
+
+### D. Picture-in-picture
+1. **Enter.** Press Home (`adb shell input keyevent KEYCODE_HOME`) while playing. PiP opens and
+   the video keeps playing.
+2. **No stutter.** In PiP, sample `currentTime` every 250 ms for 60 s, and count `pause` events.
+   Expect zero pauses and steady progress.
+3. **Live stream (open).** Play a live stream in PiP for 3 minutes; it must not stop every few
+   seconds. Check "PiP: stalls" in Diagnostics (should stay near 0).
+4. **Expand.** The page layout is restored and the player is not cropped. Take a screenshot; the
+   player width equals the viewport width.
+5. **Close** the PiP window: playback pauses.
+6. **PiP play/pause button** works.
+
+### E. Background play
+1. Screen off (`adb shell input keyevent KEYCODE_SLEEP`): playback continues for 3+ minutes.
+2. **Media controls:** `adb shell cmd media_session dispatch pause` / `play`, the notification
+   buttons, and the lock screen all work, and the page state follows.
+3. The notification's **Stop** pauses the video and removes the notification.
+4. Turning background play off makes the app pause when it is hidden.
+5. **Swiping the app from Recents** stops the service:
+   `adb shell dumpsys activity services com.aistudio.streamshield.vqxkpl` shows none.
+
+### F. Autoplay next video (open)
+1. **Mix in PiP:** open a mix (`list=RD…`), seek to 5 s before the end (CDP:
+   `v.currentTime = v.duration - 5`), and enter PiP. Within ~6 s of the end, the next video of
+   the mix plays, and `index` in the URL increases.
+2. **Mix with the screen off:** the same, with the screen off.
+3. **Playlist:** the same with a normal playlist (`list=PL…`).
+4. **Single video,** "Autoplay next video" on: the suggestion plays. With it off: nothing plays.
+5. **App visible:** YouTube's own countdown runs and the app does not interfere.
+
+### G. App behaviour
+1. Rotate, switch dark mode and open/close Settings while playing: the video never reloads or
+   stops.
+2. Back on the root page while playing (background play on): the app goes to the background and
+   keeps playing.
+3. Deep links: `youtu.be/<id>` and `m.youtube.com/watch?v=<id>` intents open in the app.
+4. Bookmarks and history: add, open and delete.
+
+### H. Performance and battery
+1. CPU while playing in the foreground, PiP and background, 5 minutes each:
+   `adb shell top -b -n 1 | grep streamshield`. Note `shield.js` CPU via the CDP Performance
+   domain (`Performance.getMetrics` → `ScriptDuration`).
+2. Wake lock: held while playing, released within seconds of pausing
+   (`adb shell dumpsys power | grep -i streamshield`).
+3. No foreground service or notification remains after Stop or closing the app.
+
+## 6. Reporting and follow-up
+
+- Write findings to `docs/test-reports/YYYY-MM-DD.md` with:
+  - the device or emulator, Android version and WebView version;
+  - a pass/fail table for sections A–H;
+  - measurements and screenshots.
+- For each failure, find the cause before fixing it. Use the page hooks, CDP and logcat.
+- **Fixes to `shield.js` must come with a case in `tools/shield-js-test/shield.test.mjs`**
+  reproducing the YouTube behaviour you observed: the mock page or response shape.
+- Record new YouTube quirks under "Pitfalls" in [AGENTS.md](../AGENTS.md).

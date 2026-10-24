@@ -12,6 +12,12 @@ first for the component map; this file covers commands, conventions and pitfalls
   bookmarks and history in Room.
 - Personal-use app: favour robustness and low battery and CPU use over feature breadth.
 
+## Local environment
+
+If you are running in the Docker dev container (`Dockerfile`) or another environment with
+internet access and a device/emulator, follow [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md):
+setup, inspecting the live YouTube page over CDP, and the test plan, with open items first.
+
 ## Commands
 
 ```sh
@@ -21,8 +27,8 @@ NODE_PATH=$(npm root -g) node tools/shield-js-test/shield.test.mjs   # shield.js
 node --check app/src/main/assets/shield.js                          # quick syntax check
 ```
 
-- There is no `gradlew` script checked in. Generate it with `gradle wrapper` (Gradle 9.3.1) or use
-  Android Studio.
+- There is no `gradlew` script checked in. `tools/dev-setup.sh` generates it, plus the git-ignored
+  `debug.keystore` that debug builds are signed with, and `local.properties`.
 - The build needs Google Maven (`dl.google.com`). In sandboxes without it, AndroidX and AGP cannot
   be resolved. In that case, at minimum run the shield.js tests, and compile the pure-Kotlin files
   (`engine/RequestFilter.kt`, `engine/SponsorBlockClient.kt`) in a plain Kotlin/JVM project.

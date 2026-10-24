@@ -26,6 +26,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.example.BuildConfig
 import com.example.data.WebVideoState
 import com.example.engine.AdBlockShieldEngine
 import com.example.engine.RequestFilter
@@ -156,6 +157,8 @@ class BrowserController(
     // -------------------------------------------------------------------------------------------
 
     private fun configureWebView() {
+        // Debug builds: let chrome://inspect / adb + CDP attach to the YouTube page (testing).
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
         webView.setBackgroundColor(Color.BLACK)
         webView.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
