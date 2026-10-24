@@ -39,9 +39,11 @@ emulator, Node, Playwright and Claude Code. See
 [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md) for how to start it, run the emulator, inspect the
 YouTube page over CDP, and what to test.
 
+On Linux, `tools/docker-dev.sh` runs it with rootless Docker (no sudo, nothing started at boot):
+
 ```sh
-docker build -t streamshield-dev --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
-docker run -it --rm --device /dev/kvm --network host -v "$PWD":/workspace streamshield-dev
+tools/docker-dev.sh build                # once
+tools/docker-dev.sh shell                # stops the Docker daemon again when you exit
 tools/dev-setup.sh && ./gradlew assembleDebug testDebugUnitTest      # inside the container
 ```
 

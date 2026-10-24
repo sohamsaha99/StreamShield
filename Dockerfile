@@ -75,11 +75,14 @@ RUN npm install -g playwright@1.48.2 \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # Non-root user matching the host UID so files written to the mounted repo stay yours.
+# ~/.gradle and ~/.claude are created here because named volumes mounted on them take the owner
+# of the directory in the image; Docker would otherwise create them as root.
 RUN groupadd --gid "${USER_GID}" dev 2>/dev/null || true \
     && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash dev \
     && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
     && mkdir -p /opt/avd "${PLAYWRIGHT_BROWSERS_PATH}" \
     && chown -R dev:dev "${ANDROID_HOME}" /opt/avd "${PLAYWRIGHT_BROWSERS_PATH}" \
+    && install -d -o dev -g dev "${GRADLE_USER_HOME}" /home/dev/.claude \
     && if [ -d /opt/avd/streamshield ]; then \
          mkdir -p /home/dev/.android/avd \
          && printf 'avd.ini.encoding=UTF-8\npath=/opt/avd/streamshield\ntarget=android-35\n' \

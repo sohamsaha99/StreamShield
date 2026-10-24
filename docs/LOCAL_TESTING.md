@@ -12,7 +12,24 @@ that still needs checking against the real site.
 
 ## 1. Start the container
 
-Build once (5–15 min; about 6 GB with the emulator):
+**Linux (recommended).** `tools/docker-dev.sh` runs the container with rootless Docker: a
+private daemon running as your user, started on demand as a transient systemd user unit. No
+sudo, no `docker` group, nothing enabled at boot. It needs the `docker-ce-rootless-extras`
+package (or your distribution's equivalent) and `pasta` or `slirp4netns`.
+
+```sh
+tools/docker-dev.sh build      # once; 5–15 min, about 6 GB (pass --build-arg INSTALL_EMULATOR=false to skip the emulator)
+tools/docker-dev.sh shell      # repo at /workspace, KVM passed through; stops the daemon when you exit
+tools/docker-dev.sh run './gradlew testDebugUnitTest'   # one command, then stop
+tools/docker-dev.sh purge      # delete the image, caches and all rootless Docker data
+```
+
+The container runs as root, which in rootless Docker is your own user on the host, so files
+written to the repository stay yours. Its `--network host` is the rootless daemon's network
+namespace, not the host's: drive the emulator from inside the container (or forward adb to a
+phone, below).
+
+**Other setups.** Build the image yourself:
 
 ```sh
 docker build -t streamshield-dev \
@@ -21,10 +38,8 @@ docker build -t streamshield-dev \
 docker build -t streamshield-dev --build-arg INSTALL_EMULATOR=false .
 ```
 
-Run it with the repository mounted.
-
-**Linux with KVM.** The emulator works inside the container. `--network host` makes the
-emulator reachable from the host, so you can watch it with `scrcpy`.
+**Linux with KVM, rootful Docker.** The emulator works inside the container. `--network host`
+makes the emulator reachable from the host, so you can watch it with `scrcpy`.
 
 ```sh
 docker run -it --rm --name streamshield \
