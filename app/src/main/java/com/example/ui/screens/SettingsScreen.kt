@@ -66,6 +66,7 @@ fun SettingsScreen(
     preferences: ShieldPreferencesState,
     blockCounts: BlockCounts,
     lastStart: StartDiagnostics?,
+    pipPauses: Pair<Int, Int>,
     recentBlocked: List<String>,
     bookmarks: List<BookmarkEntity>,
     watchHistory: List<WatchHistoryEntity>,
@@ -140,7 +141,7 @@ fun SettingsScreen(
                 }
 
                 item {
-                    DiagnosticsCard(lastStart = lastStart, recentBlocked = recentBlocked)
+                    DiagnosticsCard(lastStart = lastStart, pipPauses = pipPauses, recentBlocked = recentBlocked)
                 }
 
                 item {
@@ -284,7 +285,7 @@ fun SettingsScreen(
 
 /** What happened while the last video started: helps tell ad-related delays from other ones. */
 @Composable
-private fun DiagnosticsCard(lastStart: StartDiagnostics?, recentBlocked: List<String>) {
+private fun DiagnosticsCard(lastStart: StartDiagnostics?, pipPauses: Pair<Int, Int>, recentBlocked: List<String>) {
     SettingsSectionCard(title = "Diagnostics") {
         if (lastStart == null) {
             Text(
@@ -300,13 +301,23 @@ private fun DiagnosticsCard(lastStart: StartDiagnostics?, recentBlocked: List<St
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(4.dp))
-            DiagnosticLine("Time to start", String.format(Locale.US, "%.1f s", lastStart.startMs / 1000.0))
+            // A long gap between these two means the player waited; a slow first one means the
+            // page / network was slow.
+            DiagnosticLine(
+                "Video data loaded",
+                if (lastStart.loadMs >= 0) String.format(Locale.US, "%.1f s", lastStart.loadMs / 1000.0) else "?"
+            )
+            DiagnosticLine("Playback started", String.format(Locale.US, "%.1f s", lastStart.startMs / 1000.0))
             DiagnosticLine("Ad shield", if (lastStart.adBlockEnabled) "on" else "off")
             DiagnosticLine("Ads removed before playback", lastStart.adsPruned.toString())
             DiagnosticLine(
                 "Time in ad state",
                 if (lastStart.adMs > 0) String.format(Locale.US, "%.1f s", lastStart.adMs / 1000.0) else "none"
             )
+        }
+        if (pipPauses.first > 0 || pipPauses.second > 0) {
+            DiagnosticLine("PiP: page pauses refused", pipPauses.first.toString())
+            DiagnosticLine("PiP: system pauses", pipPauses.second.toString())
         }
         if (recentBlocked.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))

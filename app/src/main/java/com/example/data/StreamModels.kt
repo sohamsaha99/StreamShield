@@ -16,12 +16,17 @@ data class WebVideoState(
     val isPlaying: Boolean = false,
     val videoWidth: Int = 0,
     val videoHeight: Int = 0,
+    /** Milliseconds from navigation until the video's data was loaded (metadata), or -1. */
+    val loadMs: Int = -1,
     /** Milliseconds from navigation to the first frame, or -1 until the video has started. */
     val startMs: Int = -1,
     /** Milliseconds the player spent in an ad state while starting this video. */
     val adMs: Int = 0,
     /** Ad entries removed from YouTube's responses for this video. */
-    val adsPruned: Int = 0
+    val adsPruned: Int = 0,
+    /** In PiP: pause calls from the page that were refused, and pauses that came from the browser. */
+    val pipBlockedPauses: Int = 0,
+    val pipSystemPauses: Int = 0
 )
 
 fun extractYouTubeVideoId(url: String): String? {

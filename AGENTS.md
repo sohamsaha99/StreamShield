@@ -66,13 +66,14 @@ node --check app/src/main/assets/shield.js                          # quick synt
   background. The ViewModel uses `startForegroundService` only for the first start; later updates
   use `startService`. Stopping goes through `ACTION_SHUTDOWN` so a just-started service can still
   call `startForeground` (Android 9–11 crash otherwise).
-- **PiP playback.** Something (YouTube or the WebView) pauses the video right after entering
-  PiP. The page script undoes pauses the user did not request (`userPaused` tracks requests made
-  through the app), and the controller calls `webView.onResume()`/`resumeTimers()` on entering
-  PiP. The PiP stylesheet is the original app's, which is known to work; change it only with
-  on-device testing.
-- **Slow video starts.** Settings → Diagnostics shows the last start time, time spent in the ad
-  state and recently blocked requests. Ask for those numbers before changing ad-blocking rules.
+- **PiP playback.** YouTube's player pauses the video when the window turns into PiP. Resuming
+  with `video.play()` behind the player's back makes it pause again (audible stutter). Instead,
+  `shield.js` refuses page `pause()` calls in PiP unless the user asked (`userPaused`), and resumes
+  through the player API (`playVideo()`). The controller also calls `webView.onResume()` /
+  `resumeTimers()` on entering PiP. Settings → Diagnostics counts refused page pauses vs browser
+  pauses in PiP. The PiP stylesheet is the original app's; change it only with on-device testing.
+- **Slow video starts.** Settings → Diagnostics shows when the video data loaded and when playback
+  started, time spent in the ad state and recently blocked requests. Ask for those numbers before changing ad-blocking rules.
 - **Layout after PiP/fullscreen.** YouTube sizes its player in JavaScript. After PiP or fullscreen
   transitions, call `nudgeLayout()` or the player stays cropped.
 - **Downloads.** Downloading needs a real YouTube stream extractor. Do not reintroduce

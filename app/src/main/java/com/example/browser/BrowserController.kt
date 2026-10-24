@@ -439,9 +439,12 @@ class BrowserController(
                     isPlaying = o.optBoolean("playing"),
                     videoWidth = o.optInt("width"),
                     videoHeight = o.optInt("height"),
+                    loadMs = o.optInt("loadMs", -1),
                     startMs = o.optInt("startMs", -1),
                     adMs = o.optInt("adMs"),
-                    adsPruned = o.optInt("pruned")
+                    adsPruned = o.optInt("pruned"),
+                    pipBlockedPauses = o.optInt("pipBlocked"),
+                    pipSystemPauses = o.optInt("pipSystem")
                 )
             } catch (_: Exception) {
                 null

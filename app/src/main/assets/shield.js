@@ -348,7 +348,43 @@
     var pipKeeper = null;
     var adTimer = null;
     // Start-up diagnostics for the current video (shown in the app's settings).
-    var diag = { videoId: '', navAt: Date.now() - Math.round((window.performance && performance.now()) || 0), startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
+    var diag = { videoId: '', navAt: Date.now() - Math.round((window.performance && performance.now()) || 0), loadMs: -1, startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
+    // PiP pauses: refused page calls (YouTube's own code) vs pauses that came from the browser.
+    var pipStats = { blocked: 0, system: 0 };
+    var allowPauseCall = false;   // true while the app itself pauses
+    var lastPauseCallAt = 0;
+
+    // In PiP the only legitimate pause is the user's (through the app's PiP button). YouTube's
+    // player pauses the video when it enters the PiP window; refusing that call is what keeps
+    // playback smooth (resuming afterwards made it stutter: pause, play, pause...).
+    (function installPauseGuard() {
+        var proto = window.HTMLMediaElement && HTMLMediaElement.prototype;
+        if (!proto || !proto.pause) return;
+        var nativePause = proto.pause;
+        proto.pause = function () {
+            if (config.pip && !userPaused && !allowPauseCall && this.tagName === 'VIDEO' && !this.ended) {
+                pipStats.blocked++;
+                return;
+            }
+            lastPauseCallAt = Date.now();
+            return nativePause.apply(this, arguments);
+        };
+    })();
+
+    function pauseVideo(v) {
+        allowPauseCall = true;
+        try { v.pause(); } finally { allowPauseCall = false; }
+    }
+
+    // Resume through YouTube's player API when available so its own state stays in sync;
+    // calling video.play() behind its back makes the player pause it again.
+    function resumeVideo(v) {
+        var player = hookedPlayer || findPlayer();
+        if (player && typeof player.playVideo === 'function') {
+            try { player.playVideo(); } catch (e) {}
+        }
+        if (v && v.paused) v.play().catch(function () {});
+    }
     var sponsor = { videoId: '', segments: [] };
     var lastStateJson = '';
 
@@ -478,7 +514,10 @@
             height: video ? video.videoHeight : 0,
             // Start-up diagnostics: ms from navigation to first frame, ms spent in ad state,
             // ad entries removed from YouTube's responses.
+            loadMs: diag.loadMs,
             startMs: diag.startMs,
+            pipBlocked: pipStats.blocked,
+            pipSystem: pipStats.system,
             adMs: diag.adMs,
             pruned: diag.pruned
         };
@@ -494,6 +533,9 @@
         video.addEventListener('loadedmetadata', function () {
             lastLoadAt = Date.now();
             trackNavigation();
+            if (diag.loadMs < 0 && diag.videoId && diag.videoId === currentVideoId()) {
+                diag.loadMs = Date.now() - diag.navAt;
+            }
             applySpeed();
             onAdStateChanged();
             reportState();
@@ -510,12 +552,10 @@
         });
         video.addEventListener('pause', function () {
             reportState();
-            // Something (YouTube or the WebView) pauses video in the PiP window; the user can only
-            // pause there through the app's button, which sets userPaused.
             if (config.pip && !userPaused && !video.ended) {
-                setTimeout(function () {
-                    if (config.pip && !userPaused && video.paused && !video.ended) video.play().catch(function () {});
-                }, 60);
+                // Not a page call (those are refused above): the browser paused it.
+                if (Date.now() - lastPauseCallAt > 200) pipStats.system++;
+                resumeVideo(video);
             }
         });
         video.addEventListener('ended', function () { reportState(); });
@@ -565,12 +605,12 @@
             diag.videoId = id;
         } else {
             // Video changed without a navigation event (e.g. autoplay): start timing now.
-            diag = { videoId: id, navAt: Date.now(), startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
+            diag = { videoId: id, navAt: Date.now(), loadMs: -1, startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
         }
     }
 
     function markNavigationStart() {
-        diag = { videoId: '', navAt: Date.now(), startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
+        diag = { videoId: '', navAt: Date.now(), loadMs: -1, startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
     }
 
     function tick() {
@@ -642,13 +682,13 @@
             if (wasPip !== config.pip) {
                 if (config.pip) {
                     var v = findVideo();
-                    if (v && v.paused && !v.ended && !adActive && !userPaused) v.play().catch(function () {});
+                    if (v && v.paused && !v.ended && !adActive && !userPaused) resumeVideo(v);
                     // Backstop for pauses that do not fire a 'pause' event (cheap; PiP only).
                     if (!pipKeeper) {
                         pipKeeper = setInterval(function () {
                             var pv = findVideo();
                             if (config.pip && !userPaused && pv && pv.paused && !pv.ended && pv.readyState >= 2) {
-                                pv.play().catch(function () {});
+                                resumeVideo(pv);
                             }
                         }, 500);
                     }
@@ -665,23 +705,22 @@
         },
         play: function () {
             userPaused = false;
-            var v = findVideo();
-            if (v) v.play().catch(function () {});
+            resumeVideo(findVideo());
         },
         pause: function () {
             userPaused = true;
             var v = findVideo();
-            if (v) v.pause();
+            if (v) pauseVideo(v);
         },
         togglePlay: function () {
             var v = findVideo();
             if (!v) return;
             if (v.paused) {
                 userPaused = false;
-                v.play().catch(function () {});
+                resumeVideo(v);
             } else {
                 userPaused = true;
-                v.pause();
+                pauseVideo(v);
             }
         },
         exitFullscreen: function () {

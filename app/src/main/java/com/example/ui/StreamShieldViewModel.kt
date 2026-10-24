@@ -46,6 +46,7 @@ data class SponsorSegments(val videoId: String, val json: String)
 /** How the most recent video started; shown in Settings to diagnose slow starts. */
 data class StartDiagnostics(
     val title: String,
+    val loadMs: Int,
     val startMs: Int,
     val adMs: Int,
     val adsPruned: Int,
@@ -179,6 +180,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         if (state.startMs >= 0 && (state.videoId != previous.videoId || previous.startMs < 0)) {
             _lastStart.value = StartDiagnostics(
                 title = state.title,
+                loadMs = state.loadMs,
                 startMs = state.startMs,
                 adMs = state.adMs,
                 adsPruned = state.adsPruned,

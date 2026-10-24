@@ -313,6 +313,7 @@ fun StreamShieldApp(
     val omniboxInput by viewModel.omniboxInput.collectAsStateWithLifecycle()
     val blockCounts by viewModel.blockCounts.collectAsStateWithLifecycle()
     val lastStart by viewModel.lastStart.collectAsStateWithLifecycle()
+    val videoState by viewModel.videoState.collectAsStateWithLifecycle()
     val recentBlocked by viewModel.recentBlocked.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val watchHistory by viewModel.watchHistory.collectAsStateWithLifecycle()
@@ -365,6 +366,7 @@ fun StreamShieldApp(
                     preferences = preferences,
                     blockCounts = blockCounts,
                     lastStart = lastStart,
+                    pipPauses = videoState.pipBlockedPauses to videoState.pipSystemPauses,
                     recentBlocked = recentBlocked,
                     bookmarks = bookmarks,
                     watchHistory = watchHistory,

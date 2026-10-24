@@ -355,7 +355,8 @@ console.log('Speed, SponsorBlock, state reporting');
     check('state reports video id, title, channel, dimensions', last.videoId === 'abc123def45' && last.title === 'Test video' &&
         last.channel === 'Test Channel' && last.width === 320 && last.height === 180 && last.playing === true, last);
     check('state is only reported on change (not every tick)', states.length <= 8, states.length);
-    check('diagnostics: start time and ads removed are reported', last.startMs >= 0 && last.startMs < 10000 && last.pruned >= 1, last);
+    check('diagnostics: load time, start time and ads removed are reported',
+        last.loadMs >= 0 && last.startMs >= last.loadMs && last.startMs < 10000 && last.pruned >= 1, last);
 
     await page.evaluate(() => window.__streamShield.pause());
     await sleep(150);
@@ -381,20 +382,38 @@ console.log('Picture-in-picture layout');
     const videoBox = await page.evaluate(() => { const r = document.querySelector('video').getBoundingClientRect(); return { w: r.width, h: r.height }; });
     check('PiP: the video itself fills the window', videoBox.w === 400 && videoBox.h === 225, videoBox);
 
-    await page.evaluate(() => document.querySelector('video').play());
+    await page.evaluate(() => {
+        const v = document.querySelector('video');
+        window.__pauseEvents = 0;
+        v.addEventListener('pause', () => window.__pauseEvents++);
+        // Mock of YouTube's player API, used for resuming.
+        window.__playVideoCalls = 0;
+        document.getElementById('movie_player').playVideo = () => { window.__playVideoCalls++; v.play(); };
+        return v.play();
+    });
     await sleep(200);
-    await page.evaluate(() => document.querySelector('video').pause()); // YouTube/WebView pausing it
+    // YouTube's player calling pause() when the window turns into PiP, repeatedly.
+    await page.evaluate(() => { for (let i = 0; i < 3; i++) document.querySelector('video').pause(); });
     await sleep(300);
-    check('PiP: a pause the user did not ask for is undone', await page.evaluate(() => !document.querySelector('video').paused));
+    const pipPause = await page.evaluate(() => ({
+        paused: document.querySelector('video').paused,
+        pauseEvents: window.__pauseEvents,
+        state: (window.__streamShield.reportState(), window.__bridgeLog.filter((e) => e[0] === 'state').pop()[1])
+    }));
+    check('PiP: page pause calls are refused (no pause/play stutter)', !pipPause.paused && pipPause.pauseEvents === 0, pipPause);
+    check('PiP: refused pauses are counted for diagnostics', pipPause.state.pipBlocked === 3, pipPause.state);
     await page.evaluate(() => window.__streamShield.togglePlay()); // the PiP window's pause button
     await sleep(1200);
     check("PiP: the user's own pause is respected", await page.evaluate(() => document.querySelector('video').paused));
     await page.evaluate(() => window.__streamShield.togglePlay());
     await sleep(300);
     check('PiP: play button resumes', await page.evaluate(() => !document.querySelector('video').paused));
+    check("PiP: resuming goes through YouTube's player API", (await page.evaluate(() => window.__playVideoCalls)) >= 1);
 
     await page.setViewportSize({ width: 412, height: 800 });
     await page.evaluate(() => { window.__resizeEvents = 0; window.__streamShield.setConfig({ pip: false }); });
+    await page.evaluate(() => document.querySelector('video').pause());
+    check('outside PiP, the page can pause normally', await page.evaluate(() => document.querySelector('video').paused));
     await sleep(1200);
     const outPip = await page.evaluate(() => ({ style: !!document.getElementById('streamshield-pip'), resizes: window.__resizeEvents }));
     check('PiP style removed on exit', outPip.style === false, outPip);
