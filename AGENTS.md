@@ -83,11 +83,22 @@ node --check app/src/main/assets/shield.js                          # quick synt
   which live streams (few seconds of buffer) hit within seconds.
 - **No autoplay while hidden.** YouTube's "Up next" countdown is driven by on-screen timers and
   animation, so it never fires in PiP or the background. `shield.js` advances itself on `ended`
-  when `pip` or `!appVisible`: `player.nextVideo()`, then the next video's URL from the
-  watch-next response (`nextByVideo`). Playlists/mixes always continue; suggestions follow the
-  "Autoplay next video" setting. `appVisible` is pushed from `MainActivity.onStart/onStop`.
+  when `pip` or `!appVisible`: it opens the next video's URL from the watch-next response
+  (`nextByVideo`), and calls `player.nextVideo()` only if none was captured. Playlists/mixes always
+  continue; suggestions follow the "Autoplay next video" setting. `appVisible` is pushed from
+  `MainActivity.onStart/onStop`.
+- **m.youtube.com playlists.** The mobile player does not know the playlist (`getPlaylist()` is
+  `[]`), so `player.nextVideo()` leaves a mix for an unrelated suggestion. The queue is in
+  `singleColumnWatchNextResults.playlist.playlist` (no `nextVideo` key), and its `contents` can be a
+  window of the playlist: find the current video by id, not by `currentIndex`.
 - **Slow video starts.** Settings → Diagnostics shows when the video data loaded and when playback
   started, time spent in the ad state and recently blocked requests. Ask for those numbers before changing ad-blocking rules.
+  Known cause (2026-10-24): when YouTube scheduled a pre-roll (`adSlots` with
+  `playerBytesAdLayoutRenderer`) and the shield strips it, the SABR media server answers the first
+  `videoplayback` request with a 4000 ms backoff (UMP part 35) and no media, so playback starts
+  ~5 s after the tap. The server enforces it: removing the backoff from the response makes the
+  player retry and wait longer, and letting the ad play while fast-forwarding takes 13–22 s.
+  Videos without a scheduled pre-roll start in ~1 s. Measure with `tools/device-probe`.
 - **Layout after PiP/fullscreen.** YouTube sizes its player in JavaScript. After PiP or fullscreen
   transitions, call `nudgeLayout()` or the player stays cropped.
 - **Downloads.** Downloading needs a real YouTube stream extractor. Do not reintroduce

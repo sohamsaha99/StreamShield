@@ -100,31 +100,19 @@ adb shell am start -n com.aistudio.streamshield.vqxkpl/com.example.MainActivity
 ## 4. Look inside the YouTube page (CDP)
 
 Debug builds allow WebView inspection (`BrowserController.configureWebView`). Forward the
-DevTools socket and drive the page with Playwright:
+DevTools socket and use the scripts in [tools/device-probe](../tools/device-probe/README.md).
+Playwright's `connectOverCDP` does **not** work with Android WebView (it fails on
+`Browser.setDownloadBehavior`), so they speak raw CDP:
 
 ```sh
 PID=$(adb shell pidof com.aistudio.streamshield.vqxkpl)
 adb forward tcp:9222 localabstract:webview_devtools_remote_$PID
+node tools/device-probe/cdp.mjs -e "const v = document.querySelector('video');
+  return { url: location.href, config: window.__streamShield.getConfig(),
+           paused: v.paused, time: v.currentTime, playerClass: document.getElementById('movie_player').className }"
 ```
 
-```js
-// probe.mjs:  NODE_PATH=$(npm root -g) node probe.mjs
-import { createRequire } from 'node:module';
-const { chromium } = createRequire(import.meta.url)('playwright');
-const browser = await chromium.connectOverCDP('http://localhost:9222');
-const page = browser.contexts()[0].pages().find((p) => p.url().includes('youtube.com'));
-console.log(await page.evaluate(() => {
-  const v = document.querySelector('video');
-  return {
-    url: location.href,
-    shield: !!window.__streamShield,
-    config: window.__streamShield && window.__streamShield.getConfig(),
-    paused: v && v.paused, time: v && v.currentTime, duration: v && v.duration,
-    playerClass: document.getElementById('movie_player')?.className
-  };
-}));
-await browser.close();   // detaches only; the app keeps running
-```
+The forward breaks when the app process restarts (new PID); run it again.
 
 Useful page-side hooks (see `window.__streamShield` in `shield.js`):
 - `__streamShield.getConfig()` and `__streamShield.reportState()`;
@@ -132,9 +120,16 @@ Useful page-side hooks (see `window.__streamShield` in `shield.js`):
 - `HTMLMediaElement` events: attach `pause` / `waiting` / `playing` listeners to count
   interruptions over time.
 
-Playwright's CDP `Network` domain, or `page.on('request')` after connecting, shows which requests
-the player is waiting on. The app's own `shouldInterceptRequest` blocks are listed in
-**Settings → Diagnostics**.
+`tools/device-probe/monitor.mjs` (CDP `Network` domain) shows which requests the player is waiting
+on, and `ump.mjs` decodes the SABR media responses. The app's own `shouldInterceptRequest` blocks
+are listed in **Settings → Diagnostics**.
+
+Testing tips from the first run (see [test-reports/2026-10-24.md](test-reports/2026-10-24.md)):
+- A fresh emulator plays videos muted (YouTube's muted autoplay); that is not the shield.
+- Full page loads (intents) and taps inside YouTube behave differently: measure start delay with
+  taps on related videos, not only intents.
+- Ads are not served on every load. Before concluding "no ad", check that YouTube scheduled one:
+  `adPlacements` / `adSlots` in the raw player response, or the same test with the shield off.
 
 **Without a device**, `shield.js` can be checked against the real site in desktop Chromium with
 mobile emulation:
@@ -150,13 +145,14 @@ by the owner or never verified; prioritise them.
 ### A. Ad blocking
 1. **Pre-roll.** Open 10 different popular videos. No ad plays, and Diagnostics shows "Time in
    ad state: none".
-2. **Mid-rolls and in-video ads (open, never checked).** Play a long video (>20 min) and seek past
+2. **Mid-rolls and in-video ads** (passed on the emulator, 2026-10-24). Play a long video (>20 min) and seek past
    typical mid-roll points. No ad plays; if one does, record `#movie_player` classes and what
    `ad-showing` did.
 3. **Feed, search, Shorts.** No promoted cards in the home feed or search results, and no ads
    while swiping through Shorts.
 4. **No anti-adblock dialog** ("Ad blockers are not allowed") after 20+ videos.
-5. **Start delay (open; owner measured 5–6 s, accepted for now).**
+5. **Start delay** (explained 2026-10-24: a 4 s server-side SABR backoff when a stripped pre-roll was
+   scheduled; see the report and "Slow video starts" in AGENTS.md).
    - Compare "Video data loaded" and "Playback started" with the shield on and off, 5 videos each.
    - With CDP, find what happens between `loadedmetadata` and `playing`: requests the player
      waits on, and timers.
@@ -180,7 +176,7 @@ by the owner or never verified; prioritise them.
    the video keeps playing.
 2. **No stutter.** In PiP, sample `currentTime` every 250 ms for 60 s, and count `pause` events.
    Expect zero pauses and steady progress.
-3. **Live stream (open).** Play a live stream in PiP for 3 minutes; it must not stop every few
+3. **Live stream** (passed on the emulator, 2026-10-24). Play a live stream in PiP for 3 minutes; it must not stop every few
    seconds. Check "PiP: stalls" in Diagnostics (should stay near 0).
 4. **Expand.** The page layout is restored and the player is not cropped. Take a screenshot; the
    player width equals the viewport width.
@@ -196,7 +192,7 @@ by the owner or never verified; prioritise them.
 5. **Swiping the app from Recents** stops the service:
    `adb shell dumpsys activity services com.aistudio.streamshield.vqxkpl` shows none.
 
-### F. Autoplay next video (open)
+### F. Autoplay next video (mixes/playlists fixed and passed on the emulator, 2026-10-24)
 1. **Mix in PiP:** open a mix (`list=RD…`), seek to 5 s before the end (CDP:
    `v.currentTime = v.duration - 5`), and enter PiP. Within ~6 s of the end, the next video of
    the mix plays, and `index` in the URL increases.
