@@ -42,13 +42,15 @@ object AdBlockShieldEngine {
         return script
     }
 
-    fun configJson(prefs: ShieldPreferencesState, inPip: Boolean): String {
+    fun configJson(prefs: ShieldPreferencesState, inPip: Boolean, appVisible: Boolean = true): String {
         return JSONObject()
             .put("adBlock", prefs.adBlockEnabled)
             .put("bgPlay", prefs.backgroundPlayEnabled)
             .put("speed", prefs.playbackSpeed.toDouble())
             .put("pip", inPip)
             .put("sponsorSkip", prefs.sponsorSkipEnabled)
+            .put("autoAdvance", prefs.autoAdvanceEnabled)
+            .put("appVisible", appVisible)
             .toString()
     }
 }

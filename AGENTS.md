@@ -72,6 +72,14 @@ node --check app/src/main/assets/shield.js                          # quick synt
   through the player API (`playVideo()`). The controller also calls `webView.onResume()` /
   `resumeTimers()` on entering PiP. Settings → Diagnostics counts refused page pauses vs browser
   pauses in PiP. The PiP stylesheet is the original app's; change it only with on-device testing.
+- **Refused pauses leave YouTube "paused".** After refusing a page pause in PiP, call
+  `player.playVideo()` (`resyncPlayer`): a player that believes it is paused stops downloading,
+  which live streams (few seconds of buffer) hit within seconds.
+- **No autoplay while hidden.** YouTube's "Up next" countdown is driven by on-screen timers and
+  animation, so it never fires in PiP or the background. `shield.js` advances itself on `ended`
+  when `pip` or `!appVisible`: `player.nextVideo()`, then the next video's URL from the
+  watch-next response (`nextByVideo`). Playlists/mixes always continue; suggestions follow the
+  "Autoplay next video" setting. `appVisible` is pushed from `MainActivity.onStart/onStop`.
 - **Slow video starts.** Settings → Diagnostics shows when the video data loaded and when playback
   started, time spent in the ad state and recently blocked requests. Ask for those numbers before changing ad-blocking rules.
 - **Layout after PiP/fullscreen.** YouTube sizes its player in JavaScript. After PiP or fullscreen

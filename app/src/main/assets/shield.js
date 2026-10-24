@@ -25,7 +25,9 @@
 
     var bridge = window.StreamShieldBridge || null;
 
-    var config = { adBlock: true, bgPlay: true, speed: 1.0, pip: false, sponsorSkip: true };
+    // appVisible: false while the app is in the background (screen off / another app).
+    var config = { adBlock: true, bgPlay: true, speed: 1.0, pip: false, sponsorSkip: true,
+        appVisible: true, autoAdvance: true };
     try {
         if (bridge && bridge.getConfig) {
             var initial = JSON.parse(String(bridge.getConfig()));
@@ -170,16 +172,73 @@
         return obj;
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Next video (for auto-advance while hidden). Watch-next responses say what plays next:
+    // autoplay.autoplay.sets[0].nextVideo (playlists and mixes) or .autoplayVideo (suggestions),
+    // plus the playlist panel as a fallback. Keyed by the video the response belongs to.
+    // ---------------------------------------------------------------------------------------
+    var nextByVideo = {};
+
+    function endpointOf(node) {
+        var we = node && (node.watchEndpoint || (node.navigationEndpoint && node.navigationEndpoint.watchEndpoint));
+        return we && typeof we.videoId === 'string' ? we : null;
+    }
+
+    function captureNextVideo(obj) {
+        if (!obj || typeof obj !== 'object') return;
+        var current = endpointOf(obj.currentVideoEndpoint);
+        if (!current) return;  // only watch-next responses carry this
+        var found = { playlist: null, autoplay: null, panel: null };
+        (function walk(node, depth) {
+            if (!node || typeof node !== 'object' || depth > MAX_WALK_DEPTH) return;
+            if (Array.isArray(node)) {
+                for (var i = 0; i < node.length; i++) walk(node[i], depth + 1);
+                return;
+            }
+            for (var key in node) {
+                if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+                var value = node[key];
+                if (!value || typeof value !== 'object') continue;
+                if (key === 'nextVideo' && !found.playlist) found.playlist = endpointOf(value);
+                else if (key === 'autoplayVideo' && !found.autoplay) found.autoplay = endpointOf(value);
+                else if (key === 'playlistPanelRenderer' && !found.panel && Array.isArray(value.contents)) {
+                    var idx = typeof value.currentIndex === 'number' ? value.currentIndex : -1;
+                    var item = idx >= 0 && value.contents[idx + 1];
+                    found.panel = item && endpointOf(item.playlistPanelVideoRenderer);
+                }
+                walk(value, depth + 1);
+            }
+        })(obj, 0);
+        var next = found.playlist || found.panel || found.autoplay;
+        if (next && next.videoId !== current.videoId) {
+            nextByVideo[current.videoId] = { endpoint: next, inPlaylist: !!(found.playlist || found.panel) };
+        }
+    }
+
+    function nextVideoUrl(info) {
+        var e = info.endpoint;
+        var url = location.origin + '/watch?v=' + encodeURIComponent(e.videoId);
+        if (e.playlistId) url += '&list=' + encodeURIComponent(e.playlistId);
+        if (typeof e.index === 'number') url += '&index=' + (e.index + 1);
+        return url;
+    }
+
+    // Every InnerTube response goes through here: remember what plays next, then remove ads.
+    function handleResponse(obj) {
+        try { captureNextVideo(obj); } catch (e) {}
+        return pruneResponse(obj);
+    }
+
     // Expose pure helpers for tests.
-    var internals = { pruneResponse: pruneResponse, isAdItem: isAdItem };
+    var internals = { pruneResponse: pruneResponse, isAdItem: isAdItem, nextByVideo: nextByVideo };
 
     (function installJsonHooks() {
         var nativeParse = JSON.parse;
         JSON.parse = function (text, reviver) {
             var result = nativeParse.apply(this, arguments);
-            if (config.adBlock && result && typeof result === 'object' && typeof text === 'string' &&
+            if (result && typeof result === 'object' && typeof text === 'string' &&
                 text.length > 64 && text.indexOf('responseContext') !== -1) {
-                try { pruneResponse(result); } catch (e) {}
+                try { handleResponse(result); } catch (e) {}
             }
             return result;
         };
@@ -189,7 +248,7 @@
             var nativeJson = Response.prototype.json;
             Response.prototype.json = function () {
                 return nativeJson.apply(this, arguments).then(function (data) {
-                    try { pruneResponse(data); } catch (e) {}
+                    try { handleResponse(data); } catch (e) {}
                     return data;
                 });
             };
@@ -205,11 +264,11 @@
                     enumerable: true,
                     get: function () { return stored; },
                     set: function (value) {
-                        try { pruneResponse(value); } catch (e) {}
+                        try { handleResponse(value); } catch (e) {}
                         stored = value;
                     }
                 });
-                if (stored) pruneResponse(stored);
+                if (stored) handleResponse(stored);
             } catch (e) {}
         });
     })();
@@ -350,7 +409,7 @@
     // Start-up diagnostics for the current video (shown in the app's settings).
     var diag = { videoId: '', navAt: Date.now() - Math.round((window.performance && performance.now()) || 0), loadMs: -1, startMs: -1, adMs: 0, adSince: 0, pruned: 0 };
     // PiP pauses: refused page calls (YouTube's own code) vs pauses that came from the browser.
-    var pipStats = { blocked: 0, system: 0 };
+    var pipStats = { blocked: 0, system: 0, stalls: 0 };
     var allowPauseCall = false;   // true while the app itself pauses
     var lastPauseCallAt = 0;
 
@@ -364,12 +423,29 @@
         proto.pause = function () {
             if (config.pip && !userPaused && !allowPauseCall && this.tagName === 'VIDEO' && !this.ended) {
                 pipStats.blocked++;
+                resyncPlayer();
                 return;
             }
             lastPauseCallAt = Date.now();
             return nativePause.apply(this, arguments);
         };
     })();
+
+    // The refused pause leaves YouTube's player believing it is paused, and a "paused" player
+    // stops downloading: invisible for normal videos (long buffer), but live streams run dry
+    // every few seconds. Tell the player to play again (at most every 2 s).
+    var lastResyncAt = 0;
+    function resyncPlayer() {
+        var now = Date.now();
+        if (now - lastResyncAt < 2000) return;
+        lastResyncAt = now;
+        setTimeout(function () {
+            var player = hookedPlayer || findPlayer();
+            if (config.pip && !userPaused && player && typeof player.playVideo === 'function') {
+                try { player.playVideo(); } catch (e) {}
+            }
+        }, 0);
+    }
 
     function pauseVideo(v) {
         allowPauseCall = true;
@@ -518,6 +594,7 @@
             startMs: diag.startMs,
             pipBlocked: pipStats.blocked,
             pipSystem: pipStats.system,
+            pipStalls: pipStats.stalls,
             adMs: diag.adMs,
             pruned: diag.pruned
         };
@@ -525,6 +602,62 @@
         if (!force && json === lastStateJson) return;
         lastStateJson = json;
         report('onState', json);
+    }
+
+    // While the app is hidden (PiP, screen off, another app), YouTube's own "Up next" countdown
+    // does not run: it is driven by on-screen animation/timers. Advance ourselves: first via the
+    // player's API (keeps the single-page app), then by opening the next video's URL.
+    var advanceTimers = [];
+    var ADVANCE_FLAG = 'streamshield.autoAdvanceAt';
+
+    function cancelAutoAdvance() {
+        advanceTimers.forEach(clearTimeout);
+        advanceTimers = [];
+    }
+
+    function scheduleAutoAdvance(video) {
+        cancelAutoAdvance();
+        var hidden = config.pip || config.appVisible === false;
+        if (!hidden) return;  // visible: YouTube's own autoplay handles it
+        var id = currentVideoId();
+        var info = nextByVideo[id];
+        if (!config.autoAdvance && !(info && info.inPlaylist)) return;
+        function stillStuck() { return currentVideoId() === id && video.ended; }
+        advanceTimers.push(setTimeout(function () {
+            if (!stillStuck()) return;
+            markAutoAdvance();
+            var player = hookedPlayer || findPlayer();
+            if (player && typeof player.nextVideo === 'function') {
+                try { player.nextVideo(); } catch (e) {}
+            }
+            advanceTimers.push(setTimeout(function () {
+                if (!stillStuck()) return;
+                var next = nextByVideo[id];
+                if (next) {
+                    markAutoAdvance();
+                    location.assign(nextVideoUrl(next));
+                }
+            }, 2500));
+        }, 1500));
+    }
+
+    function markAutoAdvance() {
+        lastAdvanceAt = Date.now();
+        try { sessionStorage.setItem(ADVANCE_FLAG, String(lastAdvanceAt)); } catch (e) {}
+    }
+
+    var lastAdvanceAt = 0;
+    try { lastAdvanceAt = Number(sessionStorage.getItem(ADVANCE_FLAG)) || 0; } catch (e) {}
+
+    // After we advanced, the next video should start even though nobody tapped it.
+    function resumeAfterAdvance(video) {
+        if (!lastAdvanceAt || Date.now() - lastAdvanceAt > 30000) return;
+        if (!(config.pip || config.appVisible === false || config.bgPlay)) return;
+        lastAdvanceAt = 0;
+        try { sessionStorage.removeItem(ADVANCE_FLAG); } catch (e) {}
+        setTimeout(function () {
+            if (video.paused && !userPaused && !video.ended) resumeVideo(video);
+        }, 400);
     }
 
     function hookVideo(video) {
@@ -536,6 +669,8 @@
             if (diag.loadMs < 0 && diag.videoId && diag.videoId === currentVideoId()) {
                 diag.loadMs = Date.now() - diag.navAt;
             }
+            cancelAutoAdvance();
+            resumeAfterAdvance(video);
             applySpeed();
             onAdStateChanged();
             reportState();
@@ -558,7 +693,13 @@
                 resumeVideo(video);
             }
         });
-        video.addEventListener('ended', function () { reportState(); });
+        video.addEventListener('ended', function () {
+            reportState();
+            scheduleAutoAdvance(video);
+        });
+        video.addEventListener('waiting', function () {
+            if (config.pip) pipStats.stalls++;
+        });
         video.addEventListener('ratechange', function () {
             if (settingRate || adActive || Math.abs(video.playbackRate - config.speed) < 0.01) return;
             var rate = video.playbackRate;

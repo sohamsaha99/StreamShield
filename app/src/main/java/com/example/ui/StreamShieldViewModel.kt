@@ -89,6 +89,9 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
+    private val _appVisible = MutableStateFlow(true)
+    val appVisible: StateFlow<Boolean> = _appVisible.asStateFlow()
+
     private val _isInPipMode = MutableStateFlow(false)
     val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
 
@@ -302,6 +305,11 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         _isInPipMode.value = inPip
     }
 
+    /** False while the activity is stopped (screen off, another app in front). */
+    fun setAppVisible(visible: Boolean) {
+        _appVisible.value = visible
+    }
+
     fun openSettings() {
         _showSettings.value = true
     }
@@ -376,6 +384,10 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     fun toggleAutoPip(enabled: Boolean) {
         viewModelScope.launch { prefsRepo.setAutoPipOnLeave(enabled) }
+    }
+
+    fun toggleAutoAdvance(enabled: Boolean) {
+        viewModelScope.launch { prefsRepo.setAutoAdvance(enabled) }
     }
 
     fun toggleRememberSpeed(enabled: Boolean) {

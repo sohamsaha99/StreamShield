@@ -119,7 +119,7 @@ const browser = await chromium.launch({
     args: ['--autoplay-policy=no-user-gesture-required']
 });
 
-async function openWatchPage(config = {}) {
+async function openWatchPage(config = {}, path = '/watch?v=abc123def45') {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route('**/*', async (route) => {
@@ -145,6 +145,16 @@ async function openWatchPage(config = {}) {
         if (url.pathname === '/youtubei/v1/player') {
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(PLAYER_RESPONSE_WITH_ADS) });
         }
+        if (url.pathname === '/youtubei/v1/next') {
+            const inPlaylist = url.searchParams.get('kind') !== 'suggestion';
+            const next = { watchEndpoint: { videoId: 'nextVid0001', playlistId: 'RDabc', index: 3 } };
+            const sets = inPlaylist ? [{ nextVideo: next, autoplayVideo: next }] : [{ autoplayVideo: { watchEndpoint: { videoId: 'suggVid0001' } } }];
+            return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+                responseContext: {},
+                currentVideoEndpoint: { watchEndpoint: { videoId: 'abc123def45' } },
+                contents: { singleColumnWatchNextResults: { autoplay: { autoplay: { sets } } } }
+            }) });
+        }
         if (url.pathname === '/youtubei/v1/browse') {
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(BROWSE_RESPONSE_WITH_ADS) });
         }
@@ -155,7 +165,7 @@ async function openWatchPage(config = {}) {
     });
     await page.addInitScript(bridgeInit({ adBlock: true, bgPlay: true, speed: 1.0, pip: false, sponsorSkip: true, ...config }));
     await page.addInitScript(shieldJs);
-    await page.goto('https://m.youtube.com/watch?v=abc123def45');
+    await page.goto('https://m.youtube.com' + path);
     await page.waitForFunction(() => {
         const v = document.querySelector('video');
         return v && v.readyState >= 1 && isFinite(v.duration);
@@ -402,6 +412,8 @@ console.log('Picture-in-picture layout');
     }));
     check('PiP: page pause calls are refused (no pause/play stutter)', !pipPause.paused && pipPause.pauseEvents === 0, pipPause);
     check('PiP: refused pauses are counted for diagnostics', pipPause.state.pipBlocked === 3, pipPause.state);
+    check("PiP: YouTube's player is told to keep playing (keeps live streams loading)",
+        (await page.evaluate(() => window.__playVideoCalls)) >= 1);
     await page.evaluate(() => window.__streamShield.togglePlay()); // the PiP window's pause button
     await sleep(1200);
     check("PiP: the user's own pause is respected", await page.evaluate(() => document.querySelector('video').paused));
@@ -418,6 +430,62 @@ console.log('Picture-in-picture layout');
     const outPip = await page.evaluate(() => ({ style: !!document.getElementById('streamshield-pip'), resizes: window.__resizeEvents }));
     check('PiP style removed on exit', outPip.style === false, outPip);
     check('resize re-dispatched so the player re-lays out (fixes cropped view)', outPip.resizes >= 5, outPip);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+console.log('Auto-advance while hidden');
+{
+    async function endVideo(page, kind) {
+        await page.evaluate(async (k) => {
+            window.__nextVideoCalls = 0;
+            document.getElementById('movie_player').nextVideo = () => {
+                window.__nextVideoCalls++;
+                sessionStorage.setItem('test.nextVideoCalls', String(window.__nextVideoCalls));
+            };
+            await (await fetch('/youtubei/v1/next?kind=' + k, { method: 'POST' })).json();
+            const v = document.querySelector('video');
+            v.currentTime = v.duration - 0.3;
+            await v.play();
+        }, kind);
+    }
+
+    // In PiP, a mix: YouTube's countdown does not run, so the app advances.
+    let { context, page } = await openWatchPage({ pip: true });
+    await endVideo(page, 'playlist');
+    await page.waitForURL(/nextVid0001/, { timeout: 8000 }).catch(() => {});
+    const advanced = page.url();
+    check('PiP: first tries the player API (nextVideo)',
+        (await page.evaluate(() => sessionStorage.getItem('test.nextVideoCalls'))) === '1');
+    check('PiP: opens the next video of the mix with its playlist position',
+        /watch\?v=nextVid0001&list=RDabc&index=4/.test(advanced), advanced);
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return v && !v.paused; }, null, { timeout: 5000 }).catch(() => {});
+    check('the next video starts playing on its own', await page.evaluate(() => !document.querySelector('video').paused));
+    await context.close();
+
+    // App in the background (screen off), suggestion autoplay on.
+    ({ context, page } = await openWatchPage({ appVisible: false, autoAdvance: true }));
+    await endVideo(page, 'suggestion');
+    await page.waitForURL(/suggVid0001/, { timeout: 8000 }).catch(() => {});
+    check('background: autoplay suggestion opens', page.url().includes('suggVid0001'), page.url());
+    await context.close();
+
+    // Background, autoplay setting off: suggestions do not play, playlists still continue.
+    ({ context, page } = await openWatchPage({ appVisible: false, autoAdvance: false }));
+    await endVideo(page, 'suggestion');
+    await sleep(5000);
+    check('autoplay off: suggestion is not opened', page.url().includes('abc123def45'), page.url());
+    await endVideo(page, 'playlist');
+    await page.waitForURL(/nextVid0001/, { timeout: 8000 }).catch(() => {});
+    check('autoplay off: playlist still continues', page.url().includes('nextVid0001'), page.url());
+    await context.close();
+
+    // App visible: YouTube's own autoplay is left alone.
+    ({ context, page } = await openWatchPage({ appVisible: true, pip: false }));
+    await endVideo(page, 'playlist');
+    await sleep(5000);
+    check('visible: no auto-advance by the app', page.url().includes('abc123def45') &&
+        (await page.evaluate(() => window.__nextVideoCalls)) === 0, page.url());
     await context.close();
 }
 

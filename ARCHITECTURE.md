@@ -94,6 +94,8 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
    - a 1.5 s heartbeat that re-finds the player after single-page navigation;
    - a PiP keep-playing guard: in PiP, any pause the user did not request through the app is
      undone, using the `pause` event plus a 500 ms check that runs only in PiP;
+   - auto-advance while hidden: on `ended` in PiP or the background, play the next video of
+     the mix/playlist (or the autoplay suggestion) captured from watch-next responses;
    - start-up diagnostics (time to first frame, time in ad state, ads removed), sent with the
      state report and shown in Settings → Diagnostics.
 5. **Native → page API:** `window.__streamShield.setConfig`, `setSponsorSegments`, `play`, `pause`,

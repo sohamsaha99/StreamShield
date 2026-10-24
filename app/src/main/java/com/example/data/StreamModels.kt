@@ -26,7 +26,9 @@ data class WebVideoState(
     val adsPruned: Int = 0,
     /** In PiP: pause calls from the page that were refused, and pauses that came from the browser. */
     val pipBlockedPauses: Int = 0,
-    val pipSystemPauses: Int = 0
+    val pipSystemPauses: Int = 0,
+    /** In PiP: times playback stalled waiting for data (live streams run dry when this grows). */
+    val pipStalls: Int = 0
 )
 
 fun extractYouTubeVideoId(url: String): String? {

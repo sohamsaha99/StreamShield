@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -66,7 +67,7 @@ fun SettingsScreen(
     preferences: ShieldPreferencesState,
     blockCounts: BlockCounts,
     lastStart: StartDiagnostics?,
-    pipPauses: Pair<Int, Int>,
+    pipStats: PipStats,
     recentBlocked: List<String>,
     bookmarks: List<BookmarkEntity>,
     watchHistory: List<WatchHistoryEntity>,
@@ -75,6 +76,7 @@ fun SettingsScreen(
     onToggleSponsorSkip: (Boolean) -> Unit,
     onToggleBackgroundPlay: (Boolean) -> Unit,
     onToggleAutoPip: (Boolean) -> Unit,
+    onToggleAutoAdvance: (Boolean) -> Unit,
     onOpenSpeedSheet: () -> Unit,
     onToggleDarkMode: (Boolean) -> Unit,
     onToggleAmoledBlack: (Boolean) -> Unit,
@@ -141,7 +143,7 @@ fun SettingsScreen(
                 }
 
                 item {
-                    DiagnosticsCard(lastStart = lastStart, pipPauses = pipPauses, recentBlocked = recentBlocked)
+                    DiagnosticsCard(lastStart = lastStart, pipStats = pipStats, recentBlocked = recentBlocked)
                 }
 
                 item {
@@ -164,6 +166,16 @@ fun SettingsScreen(
                             checked = preferences.autoPipOnLeave,
                             onCheckedChange = onToggleAutoPip,
                             testTag = "setting_auto_pip_switch"
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        SettingToggleRow(
+                            icon = Icons.Default.SkipNext,
+                            iconTint = EmeraldSafe,
+                            title = "Autoplay next video",
+                            subtitle = "In PiP or the background, start the next suggested video when one ends. Playlists and mixes always continue",
+                            checked = preferences.autoAdvanceEnabled,
+                            onCheckedChange = onToggleAutoAdvance,
+                            testTag = "setting_auto_advance_switch"
                         )
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
                         Row(
@@ -283,9 +295,12 @@ fun SettingsScreen(
     }
 }
 
+/** Playback interruptions seen in picture-in-picture (shown in Diagnostics). */
+data class PipStats(val refusedPauses: Int, val systemPauses: Int, val stalls: Int)
+
 /** What happened while the last video started: helps tell ad-related delays from other ones. */
 @Composable
-private fun DiagnosticsCard(lastStart: StartDiagnostics?, pipPauses: Pair<Int, Int>, recentBlocked: List<String>) {
+private fun DiagnosticsCard(lastStart: StartDiagnostics?, pipStats: PipStats, recentBlocked: List<String>) {
     SettingsSectionCard(title = "Diagnostics") {
         if (lastStart == null) {
             Text(
@@ -315,9 +330,10 @@ private fun DiagnosticsCard(lastStart: StartDiagnostics?, pipPauses: Pair<Int, I
                 if (lastStart.adMs > 0) String.format(Locale.US, "%.1f s", lastStart.adMs / 1000.0) else "none"
             )
         }
-        if (pipPauses.first > 0 || pipPauses.second > 0) {
-            DiagnosticLine("PiP: page pauses refused", pipPauses.first.toString())
-            DiagnosticLine("PiP: system pauses", pipPauses.second.toString())
+        if (pipStats.refusedPauses > 0 || pipStats.systemPauses > 0 || pipStats.stalls > 0) {
+            DiagnosticLine("PiP: page pauses refused", pipStats.refusedPauses.toString())
+            DiagnosticLine("PiP: system pauses", pipStats.systemPauses.toString())
+            DiagnosticLine("PiP: stalls (waiting for data)", pipStats.stalls.toString())
         }
         if (recentBlocked.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))

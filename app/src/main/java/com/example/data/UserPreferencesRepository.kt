@@ -23,6 +23,8 @@ data class ShieldPreferencesState(
     val autoPipOnLeave: Boolean = true,
     val playbackSpeed: Float = 1.0f,
     val rememberSpeedAcrossVideos: Boolean = true,
+    /** Start the next video of a mix/playlist/autoplay when one ends in PiP or the background. */
+    val autoAdvanceEnabled: Boolean = true,
     /** Ads removed from YouTube responses or skipped in the player. */
     val adsBlockedCount: Long = 0L,
     /** Ad / tracker network requests refused. */
@@ -40,6 +42,7 @@ class UserPreferencesRepository(private val context: Context) {
         val AUTO_PIP = booleanPreferencesKey("auto_pip")
         val PLAYBACK_SPEED = floatPreferencesKey("playback_speed")
         val REMEMBER_SPEED = booleanPreferencesKey("remember_speed")
+        val AUTO_ADVANCE = booleanPreferencesKey("auto_advance")
         // v2 keys: the v1 counters were seeded with made-up numbers, so they are not carried over.
         val ADS_BLOCKED = longPreferencesKey("ads_blocked_count_v2")
         val REQUESTS_BLOCKED = longPreferencesKey("requests_blocked_count_v2")
@@ -55,6 +58,7 @@ class UserPreferencesRepository(private val context: Context) {
             autoPipOnLeave = prefs[Keys.AUTO_PIP] ?: true,
             playbackSpeed = (prefs[Keys.PLAYBACK_SPEED] ?: 1.0f).coerceIn(0.25f, 3.0f),
             rememberSpeedAcrossVideos = prefs[Keys.REMEMBER_SPEED] ?: true,
+            autoAdvanceEnabled = prefs[Keys.AUTO_ADVANCE] ?: true,
             adsBlockedCount = prefs[Keys.ADS_BLOCKED] ?: 0L,
             requestsBlockedCount = prefs[Keys.REQUESTS_BLOCKED] ?: 0L
         )
@@ -88,6 +92,10 @@ class UserPreferencesRepository(private val context: Context) {
         // Snap to 0.05 steps; round (not truncate) so 1.15f does not become 1.10.
         val clamped = ((speed * 20f).roundToInt() / 20f).coerceIn(0.25f, 3.0f)
         context.dataStore.edit { it[Keys.PLAYBACK_SPEED] = clamped }
+    }
+
+    suspend fun setAutoAdvance(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.AUTO_ADVANCE] = enabled }
     }
 
     suspend fun setRememberSpeed(enabled: Boolean) {

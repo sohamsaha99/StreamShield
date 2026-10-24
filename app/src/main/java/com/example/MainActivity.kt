@@ -65,6 +65,7 @@ import com.example.service.PlaybackCommands
 import com.example.ui.StreamShieldViewModel
 import com.example.ui.components.PlaybackSpeedBottomSheet
 import com.example.ui.screens.BrowserScreen
+import com.example.ui.screens.PipStats
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.EmeraldSafe
 import com.example.ui.theme.MyApplicationTheme
@@ -142,6 +143,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.setAppVisible(true)
+    }
+
     override fun onResume() {
         super.onResume()
         pipJustClosed = false
@@ -149,6 +155,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        viewModel.setAppVisible(false)
         viewModel.flushCountsNow()
         if (pipJustClosed) {
             // The PiP window was dismissed (expanding it resumes instead of stopping): stop watching.
@@ -366,7 +373,7 @@ fun StreamShieldApp(
                     preferences = preferences,
                     blockCounts = blockCounts,
                     lastStart = lastStart,
-                    pipPauses = videoState.pipBlockedPauses to videoState.pipSystemPauses,
+                    pipStats = PipStats(videoState.pipBlockedPauses, videoState.pipSystemPauses, videoState.pipStalls),
                     recentBlocked = recentBlocked,
                     bookmarks = bookmarks,
                     watchHistory = watchHistory,
@@ -375,6 +382,7 @@ fun StreamShieldApp(
                     onToggleSponsorSkip = viewModel::toggleSponsorSkip,
                     onToggleBackgroundPlay = viewModel::toggleBackgroundPlay,
                     onToggleAutoPip = viewModel::toggleAutoPip,
+                    onToggleAutoAdvance = viewModel::toggleAutoAdvance,
                     onOpenSpeedSheet = viewModel::openSpeedSheet,
                     onToggleDarkMode = viewModel::toggleDarkMode,
                     onToggleAmoledBlack = viewModel::toggleAmoledBlack,

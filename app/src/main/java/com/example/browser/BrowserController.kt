@@ -198,7 +198,7 @@ class BrowserController(
 
     private fun observeViewModel() {
         activity.lifecycleScope.launch {
-            combine(viewModel.preferences, viewModel.isInPipMode) { prefs, pip ->
+            combine(viewModel.preferences, viewModel.isInPipMode, viewModel.appVisible) { prefs, pip, visible ->
                 webView.keepAlive = prefs.backgroundPlayEnabled || pip
                 if (pip) {
                     // As the original app did: make sure Chromium's media pipeline and timers run
@@ -206,7 +206,7 @@ class BrowserController(
                     webView.onResume()
                     webView.resumeTimers()
                 }
-                AdBlockShieldEngine.configJson(prefs, pip)
+                AdBlockShieldEngine.configJson(prefs, pip, visible)
             }.distinctUntilChanged().collect { pushConfig(it) }
         }
         activity.lifecycleScope.launch {
@@ -228,7 +228,11 @@ class BrowserController(
     // -------------------------------------------------------------------------------------------
 
     private fun currentConfigJson(): String =
-        AdBlockShieldEngine.configJson(viewModel.preferences.value, viewModel.isInPipMode.value)
+        AdBlockShieldEngine.configJson(
+            viewModel.preferences.value,
+            viewModel.isInPipMode.value,
+            viewModel.appVisible.value
+        )
 
     private fun pushConfig(json: String = currentConfigJson()) {
         if (destroyed) return
@@ -444,7 +448,8 @@ class BrowserController(
                     adMs = o.optInt("adMs"),
                     adsPruned = o.optInt("pruned"),
                     pipBlockedPauses = o.optInt("pipBlocked"),
-                    pipSystemPauses = o.optInt("pipSystem")
+                    pipSystemPauses = o.optInt("pipSystem"),
+                    pipStalls = o.optInt("pipStalls")
                 )
             } catch (_: Exception) {
                 null
