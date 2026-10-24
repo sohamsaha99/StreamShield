@@ -27,6 +27,12 @@ import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.example.data.WebVideoState
+import com.example.data.isYouTubeBrowsePage
+import com.example.data.isYouTubeVideoPage
+import com.example.ui.PlaybackSource
+import com.example.ui.PageChannel
+import com.example.ui.PullSource
+import com.example.ui.MUSIC_HOME_URL
 import com.example.engine.AdBlockShieldEngine
 import com.example.engine.RequestFilter
 import com.example.service.PlaybackCommand
@@ -73,7 +79,8 @@ class KeepAliveWebView(context: Context) : WebView(context) {
 }
 
 /**
- * Owns the single YouTube WebView for the lifetime of the activity: navigation, the ad-block
+ * Owns the player WebView (videos and YouTube Music) for the lifetime of the activity; browsing
+ * pages live in [BrowsePageController]. Handles navigation, the ad-block
  * network filter, the page script, fullscreen video, and media commands. Settings are read from
  * the ViewModel at the time they are needed, never captured, so toggles apply immediately.
  */
@@ -103,13 +110,65 @@ class BrowserController(
     // Public API used by the UI
     // -------------------------------------------------------------------------------------------
 
+    /**
+     * History index of the first page opened by the app's last [load]. Pages before it belong to
+     * an earlier visit (e.g. a video watched before going back to the tabs), so Back from the web
+     * page stops there and returns to the app's tabs instead.
+     */
+    private var sessionStartIndex = 0
+
+    /** Loads [url] as a new visit from the app (a search, a video, a channel, a shared link). */
     fun load(url: String) {
+        sessionStartIndex = webView.copyBackForwardList().currentIndex + 1
         webView.loadUrl(url)
     }
 
+    /** True if Back can stay inside the current visit (see [sessionStartIndex]). */
+    fun canGoBackInSession(): Boolean =
+        webView.canGoBack() && webView.copyBackForwardList().currentIndex > sessionStartIndex
+
+    /** URL of the previous page of the current visit, or null. */
+    fun previousUrlInSession(): String? = if (canGoBackInSession()) previousUrl() else null
+
     fun reload() = webView.reload()
 
+    /** YouTube Music song to start again after a pull-to-refresh reload (id, position). */
+    private var resumeAfterReload: Pair<String, Int>? = null
+    /** After the fallback (opening the song's page): seek there once it loads. */
+    private var seekAfterLoad: Pair<String, Int>? = null
+
+    /**
+     * Pull-to-refresh: reloads the page. YouTube Music stops playing on a reload, so a song that
+     * was playing is started again from the same point afterwards.
+     */
+    fun refreshPage() {
+        if (destroyed) return
+        val video = viewModel.videoState.value
+        resumeAfterReload = if (video.isMusicPage && video.isPlaying && video.videoId.isNotBlank()) {
+            video.videoId to video.positionSec
+        } else {
+            null
+        }
+        webView.reload()
+    }
+
+    private fun handleResumeResult(ok: Boolean, videoId: String, position: Int) {
+        if (ok || destroyed) return
+        // The player API did not take it: open the song's page and seek there.
+        seekAfterLoad = videoId to position
+        load("$MUSIC_HOME_URL/watch?v=$videoId")
+    }
+
+    private var lastResume: Pair<String, Int>? = null
+
     fun canGoBack(): Boolean = webView.canGoBack()
+
+    /** URL of the previous history entry, or null (used to keep Back inside YouTube Music). */
+    fun previousUrl(): String? {
+        val list = webView.copyBackForwardList()
+        val index = list.currentIndex - 1
+        return if (index >= 0) list.getItemAtIndex(index)?.url else null
+    }
 
     fun goBack() {
         if (webView.canGoBack()) webView.goBack()
@@ -124,6 +183,11 @@ class BrowserController(
     fun pause() = runPageCommand("pause()")
 
     fun togglePlay() = runPageCommand("togglePlay()")
+
+    /** Next / previous track, through the page's own queue, autoplay or playlist. */
+    fun next() = runPageCommand("next()")
+
+    fun previous() = runPageCommand("previous()")
 
     val isFullscreen: Boolean get() = fullscreenView != null
 
@@ -197,27 +261,44 @@ class BrowserController(
     }
 
     private fun observeViewModel() {
+        // Keep the page "visible" in the background only while it has a video or song loaded (so
+        // it can play or be resumed from the notification). An idle page (YouTube's start page, or
+        // while a download plays) is left to Chromium's normal background throttling.
+        val hasWebMedia = combine(viewModel.videoState, viewModel.playbackSource) { video, source ->
+            source == PlaybackSource.WEB && video.videoId.isNotBlank()
+        }.distinctUntilChanged()
         activity.lifecycleScope.launch {
-            combine(viewModel.preferences, viewModel.isInPipMode) { prefs, pip ->
-                webView.keepAlive = prefs.backgroundPlayEnabled || pip
+            combine(viewModel.preferences, viewModel.isInPipMode, hasWebMedia) { prefs, pip, media ->
+                webView.keepAlive = pip || (prefs.backgroundPlayEnabled && media)
                 if (pip) {
                     // As the original app did: make sure Chromium's media pipeline and timers run
                     // in the PiP window.
                     webView.onResume()
                     webView.resumeTimers()
                 }
-                AdBlockShieldEngine.configJson(prefs, pip)
+            }.collect { }
+        }
+        activity.lifecycleScope.launch {
+            combine(viewModel.preferences, viewModel.isInPipMode, viewModel.appVisible, viewModel.playerPullMode) { prefs, pip, visible, pull ->
+                AdBlockShieldEngine.configJson(prefs, pip, appVisible = visible, pull = pull)
             }.distinctUntilChanged().collect { pushConfig(it) }
+        }
+        activity.lifecycleScope.launch {
+            viewModel.subscriptionsChanged.collect { runPageCommand("refreshSubscribeButtons()") }
         }
         activity.lifecycleScope.launch {
             viewModel.sponsorSegments.collect { pushSponsorSegments() }
         }
         activity.lifecycleScope.launch {
             PlaybackCommands.flow.collect { command ->
+                // Downloads play in the offline player; it takes the media buttons while active.
+                if (viewModel.playbackSource.value != PlaybackSource.WEB) return@collect
                 when (command) {
                     PlaybackCommand.PLAY -> play()
                     PlaybackCommand.PAUSE, PlaybackCommand.STOP -> pause()
                     PlaybackCommand.TOGGLE -> togglePlay()
+                    PlaybackCommand.NEXT -> next()
+                    PlaybackCommand.PREVIOUS -> previous()
                 }
             }
         }
@@ -228,7 +309,12 @@ class BrowserController(
     // -------------------------------------------------------------------------------------------
 
     private fun currentConfigJson(): String =
-        AdBlockShieldEngine.configJson(viewModel.preferences.value, viewModel.isInPipMode.value)
+        AdBlockShieldEngine.configJson(
+            viewModel.preferences.value,
+            viewModel.isInPipMode.value,
+            appVisible = viewModel.appVisible.value,
+            pull = viewModel.playerPullMode.value
+        )
 
     private fun pushConfig(json: String = currentConfigJson()) {
         if (destroyed) return
@@ -258,8 +344,19 @@ class BrowserController(
         view.evaluateJavascript(AdBlockShieldEngine.shieldScript(activity), null)
     }
 
+    private var lastPageUrl = ""
+
     private fun reportPage(view: WebView?, url: String?, loading: Boolean) {
         if (view == null || url == null || url == "about:blank") return
+        val previous = lastPageUrl
+        lastPageUrl = url
+        if (url != previous && isYouTubeVideoPage(previous) && isYouTubeBrowsePage(url)) {
+            // Left a video for a channel / results page by a route the page script did not catch:
+            // show that page in the browse page and put the video back.
+            viewModel.openBrowse(url)
+            mainHandler.post { if (!destroyed && webView.canGoBack()) webView.goBack() }
+            return
+        }
         viewModel.onPageChanged(url, view.title, view.canGoBack(), view.canGoForward(), loading)
     }
 
@@ -276,7 +373,52 @@ class BrowserController(
         @JavascriptInterface
         fun onState(json: String?) {
             val state = parseState(json) ?: return
-            mainHandler.post { viewModel.onVideoState(state) }
+            val pagePip = try { JSONObject(json ?: "{}").optBoolean("cfgPip") } catch (_: Exception) { false }
+            mainHandler.post {
+                // The page's copy of the PiP flag must match the app's (a lost config update
+                // would leave YouTube's own pause refused): send the config again if not.
+                if (pagePip != viewModel.isInPipMode.value) pushConfig()
+                viewModel.onVideoState(state)
+            }
+        }
+
+        @JavascriptInterface
+        fun onPull(data: String?) {
+            val mode = data?.substringBefore(':') ?: return
+            val distance = data.substringAfter(':', "").toFloatOrNull() ?: return
+            mainHandler.post { viewModel.onWebPull(PullSource.PLAYER, mode, distance) }
+        }
+
+        @JavascriptInterface
+        fun onPullEnd(json: String?) {
+            val o = try { JSONObject(json ?: return) } catch (_: Exception) { return }
+            mainHandler.post {
+                viewModel.onWebPullEnd(
+                    PullSource.PLAYER,
+                    o.optString("mode"),
+                    o.optDouble("distance", 0.0).toFloat(),
+                    o.optDouble("velocity", 0.0).toFloat(),
+                    o.optBoolean("cancelled")
+                )
+            }
+        }
+
+        @JavascriptInterface
+        fun onSubscribeTap(json: String?) {
+            val channel = parseChannel(json) ?: return
+            mainHandler.post { viewModel.onPageSubscribeTap(channel) }
+        }
+
+        @JavascriptInterface
+        fun isSubscribed(json: String?): Boolean {
+            val channel = parseChannel(json) ?: return false
+            return viewModel.isChannelSubscribed(channel.id, channel.path)
+        }
+
+        @JavascriptInterface
+        fun onResumeResult(result: String?) {
+            val resume = lastResume ?: return
+            mainHandler.post { handleResumeResult(result == "ok", resume.first, resume.second) }
         }
 
         @JavascriptInterface
@@ -284,6 +426,23 @@ class BrowserController(
             val value = speed?.toFloatOrNull() ?: return
             mainHandler.post { viewModel.setPlaybackSpeed(value) }
         }
+
+        /** The YouTube logo in m.youtube's top bar was tapped: show the app's Home tab. */
+        @JavascriptInterface
+        fun onHomeLogo(url: String?) {
+            mainHandler.post { viewModel.onHomeLogoTapped() }
+        }
+
+        /** A channel / playlist / search link on the video page: open it in the browse page. */
+        @JavascriptInterface
+        fun onOpenBrowse(url: String?) {
+            if (url.isNullOrBlank()) return
+            mainHandler.post { viewModel.openBrowse(url) }
+        }
+
+        /** Only the browse page reports video taps; kept for an identical bridge surface. */
+        @JavascriptInterface
+        fun onOpenVideo(url: String?) = Unit
 
         @JavascriptInterface
         fun onSponsorSkipped(seconds: String?) {
@@ -328,6 +487,15 @@ class BrowserController(
             pushConfig()
             pushSponsorSegments()
             reportPage(view, url, loading = false)
+            resumeAfterReload?.let { (id, pos) ->
+                resumeAfterReload = null
+                lastResume = id to pos
+                runPageCommand("resumeMusic(${JSONObject.quote(id)}, $pos)")
+            }
+            seekAfterLoad?.let { (id, pos) ->
+                seekAfterLoad = null
+                runPageCommand("seekWhenReady(${JSONObject.quote(id)}, $pos)")
+            }
         }
 
         override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -426,6 +594,17 @@ class BrowserController(
                 .replace(" Version/4.0", "")
         }
 
+        /** {id, path, name} from the page script's Subscribe button. */
+        fun parseChannel(json: String?): PageChannel? {
+            if (json.isNullOrBlank()) return null
+            return try {
+                val o = JSONObject(json)
+                PageChannel(o.optString("id"), o.optString("path"), o.optString("name"))
+            } catch (_: Exception) {
+                null
+            }
+        }
+
         private fun parseState(json: String?): WebVideoState? {
             if (json.isNullOrBlank()) return null
             return try {
@@ -444,7 +623,16 @@ class BrowserController(
                     adMs = o.optInt("adMs"),
                     adsPruned = o.optInt("pruned"),
                     pipBlockedPauses = o.optInt("pipBlocked"),
-                    pipSystemPauses = o.optInt("pipSystem")
+                    pipSystemPauses = o.optInt("pipSystem"),
+                    channelId = o.optString("channelId"),
+                    lengthSec = o.optInt("lengthSec"),
+                    viewCount = o.optLong("views"),
+                    category = o.optString("category"),
+                    positionSec = o.optInt("pos"),
+                    ended = o.optBoolean("ended"),
+                    timersBoosted = o.optInt("boosted"),
+                    tapFixes = o.optInt("tapFix"),
+                    tapFixTop = o.optString("tapTop")
                 )
             } catch (_: Exception) {
                 null

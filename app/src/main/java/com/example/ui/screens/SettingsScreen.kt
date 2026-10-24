@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
@@ -49,13 +48,17 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.data.BookmarkEntity
+import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.SkipNext
+import com.example.data.BackupFolder
+import com.example.data.formatAgo
 import com.example.data.ShieldPreferencesState
-import com.example.data.WatchHistoryEntity
 import com.example.data.formatCount
 import com.example.data.formatSpeedBadge
 import com.example.ui.BlockCounts
 import com.example.ui.StartDiagnostics
+import com.example.download.SmartDownloads
+import androidx.compose.material.icons.filled.AutoAwesome
 import java.util.Locale
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.EmeraldSafe
@@ -68,9 +71,9 @@ fun SettingsScreen(
     lastStart: StartDiagnostics?,
     pipPauses: Pair<Int, Int>,
     recentBlocked: List<String>,
-    bookmarks: List<BookmarkEntity>,
-    watchHistory: List<WatchHistoryEntity>,
     onClose: () -> Unit,
+    /** Play/pause taps the page missed and the app applied (this session), and what was on top. */
+    tapFixes: Pair<Int, String> = 0 to "",
     onToggleAdBlock: (Boolean) -> Unit,
     onToggleSponsorSkip: (Boolean) -> Unit,
     onToggleBackgroundPlay: (Boolean) -> Unit,
@@ -79,9 +82,17 @@ fun SettingsScreen(
     onToggleDarkMode: (Boolean) -> Unit,
     onToggleAmoledBlack: (Boolean) -> Unit,
     onResetCounts: () -> Unit,
-    onOpenUrl: (String) -> Unit,
-    onDeleteBookmark: (Long) -> Unit,
-    onClearHistory: () -> Unit,
+    onToggleAutoplay: (Boolean) -> Unit,
+    onToggleShowStartTime: (Boolean) -> Unit,
+    onSetSmartSize: (Int) -> Unit,
+    onRefreshSmart: () -> Unit,
+    onResetDownloadQuality: (Boolean) -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
+    onToggleAutoBackup: (Boolean) -> Unit,
+    onChooseBackupFolder: () -> Unit,
+    onBackupNow: () -> Unit,
+    onImportTakeoutHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onClose)
@@ -141,7 +152,14 @@ fun SettingsScreen(
                 }
 
                 item {
-                    DiagnosticsCard(lastStart = lastStart, pipPauses = pipPauses, recentBlocked = recentBlocked)
+                    DiagnosticsCard(
+                        lastStart = lastStart,
+                        pipPauses = pipPauses,
+                        tapFixes = tapFixes,
+                        recentBlocked = recentBlocked,
+                        showStartTime = preferences.showStartTime,
+                        onToggleShowStartTime = onToggleShowStartTime
+                    )
                 }
 
                 item {
@@ -164,6 +182,16 @@ fun SettingsScreen(
                             checked = preferences.autoPipOnLeave,
                             onCheckedChange = onToggleAutoPip,
                             testTag = "setting_auto_pip_switch"
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        SettingToggleRow(
+                            icon = Icons.Default.SkipNext,
+                            iconTint = EmeraldSafe,
+                            title = "Autoplay",
+                            subtitle = "Play the next video or song when one ends, also in the background and in picture-in-picture",
+                            checked = preferences.autoplayEnabled,
+                            onCheckedChange = onToggleAutoplay,
+                            testTag = "setting_autoplay_switch"
                         )
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
                         Row(
@@ -221,61 +249,60 @@ fun SettingsScreen(
                 }
 
                 item {
-                    SettingsSectionCard(title = "Bookmarks") {
-                        if (bookmarks.isEmpty()) {
-                            Text(
-                                text = "Use the bookmark button next to the address bar to save pages here.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
-                            bookmarks.forEach { bookmark ->
-                                ListEntryRow(
-                                    icon = Icons.Default.Bookmark,
-                                    title = bookmark.title,
-                                    subtitle = bookmark.url.removePrefix("https://"),
-                                    onClick = { onOpenUrl(bookmark.url) },
-                                    trailing = {
-                                        IconButton(onClick = { onDeleteBookmark(bookmark.id) }) {
-                                            Icon(Icons.Default.Delete, contentDescription = "Delete bookmark")
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
+                    DownloadsCard(
+                        preferences = preferences,
+                        onSetSmartSize = onSetSmartSize,
+                        onRefreshSmart = onRefreshSmart,
+                        onResetDownloadQuality = onResetDownloadQuality
+                    )
                 }
 
                 item {
-                    SettingsSectionCard(title = "Recently watched") {
-                        if (watchHistory.isEmpty()) {
-                            Text(
-                                text = "Videos you watch appear here.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
-                            watchHistory.take(15).forEach { entry ->
-                                ListEntryRow(
-                                    icon = Icons.Default.History,
-                                    title = entry.title,
-                                    subtitle = entry.channelName.ifBlank { "YouTube" },
-                                    onClick = { onOpenUrl(entry.videoUrl) },
-                                    trailing = null
-                                )
+                    SettingsSectionCard(title = "Backup & restore") {
+                        Text(
+                            text = "No account needed: subscriptions, playlists, likes, history, searches and settings " +
+                                "are saved in one file. Import it on a new phone to continue where you left off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(onClick = onExportBackup, modifier = Modifier.weight(1f).testTag("backup_export")) {
+                                Text("Export")
                             }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedButton(
-                                onClick = onClearHistory,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("clear_history_button")
-                            ) {
-                                Icon(imageVector = Icons.Default.DeleteSweep, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Clear history")
+                            OutlinedButton(onClick = onImportBackup, modifier = Modifier.weight(1f).testTag("backup_import")) {
+                                Text("Import")
                             }
                         }
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        SettingToggleRow(
+                            icon = Icons.Default.Backup,
+                            iconTint = CyberCyan,
+                            title = "Automatic daily backup",
+                            subtitle = if (preferences.autoBackupFolder.isBlank()) "Pick a folder once (for example a Google Drive folder)"
+                            else "To ${BackupFolder.displayName(preferences.autoBackupFolder)}" +
+                                (if (preferences.lastAutoBackupAt > 0) " \u2022 last ${formatAgo(preferences.lastAutoBackupAt)}" else "") +
+                                " \u2022 keeps the newest 7",
+                            checked = preferences.autoBackupEnabled && preferences.autoBackupFolder.isNotBlank(),
+                            onCheckedChange = { on ->
+                                if (on && preferences.autoBackupFolder.isBlank()) onChooseBackupFolder() else onToggleAutoBackup(on)
+                            },
+                            testTag = "backup_auto_switch"
+                        )
+                        if (preferences.autoBackupFolder.isNotBlank()) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = onChooseBackupFolder) { Text("Change folder") }
+                                TextButton(onClick = onBackupNow) { Text("Back up now") }
+                            }
+                        }
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                        ListEntryRow(
+                            icon = Icons.Default.History,
+                            title = "Import YouTube history",
+                            subtitle = "watch-history.json from Google Takeout (JSON format) seeds history and recommendations",
+                            onClick = onImportTakeoutHistory,
+                            trailing = null
+                        )
                     }
                 }
             }
@@ -283,10 +310,128 @@ fun SettingsScreen(
     }
 }
 
+/** Smart download size, refresh, and the remembered download qualities. */
+@Composable
+private fun DownloadsCard(
+    preferences: ShieldPreferencesState,
+    onSetSmartSize: (Int) -> Unit,
+    onRefreshSmart: () -> Unit,
+    onResetDownloadQuality: (Boolean) -> Unit
+) {
+    SettingsSectionCard(title = "Downloads") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = ShieldCoral, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Text("Smart downloads (music)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        }
+        Text(
+            "Songs picked from what you listen to (plus some new ones), kept inside the app for offline listening. " +
+                "Updates once a day on Wi-Fi while charging.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        SmartDownloads.SIZE_OPTIONS_MB.chunked(3).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                row.forEach { mb ->
+                    val selected = preferences.smartSizeMb == mb
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (selected) ShieldCoral.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = if (selected) ShieldCoral else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onSetSmartSize(mb) }
+                            .testTag("smart_size_$mb")
+                    ) {
+                        Text(
+                            sizeLabel(mb),
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            buildString {
+                if (preferences.smartSizeMb > 0) {
+                    append("≈ ${SmartDownloads.estimatedSongs(preferences.smartSizeMb)} songs (M4A, about 1 MB per minute)")
+                } else {
+                    append("Off")
+                }
+                if (preferences.lastSmartRefreshAt > 0) append(" · last update ${formatAgo(preferences.lastSmartRefreshAt)}")
+                if (preferences.smartSummary.isNotBlank()) append(": ${preferences.smartSummary}")
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (preferences.smartSizeMb > 0) {
+            TextButton(onClick = onRefreshSmart, modifier = Modifier.testTag("smart_refresh_now")) {
+                Text("Refresh now (on Wi-Fi)")
+            }
+        }
+        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+        QualityLine("Video download quality", preferences.downloadVideoQuality) { onResetDownloadQuality(false) }
+        QualityLine("Song download quality", preferences.downloadMusicQuality) { onResetDownloadQuality(true) }
+        Text(
+            "Downloads are saved to Movies/StreamShield and Music/StreamShield.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun QualityLine(title: String, remembered: Int, onReset: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                when {
+                    remembered < 0 -> "Ask each time"
+                    remembered == 0 -> "Audio only (remembered)"
+                    else -> "${remembered}p (remembered)"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (remembered >= 0) TextButton(onClick = onReset) { Text("Ask again") }
+    }
+}
+
+private fun sizeLabel(mb: Int): String = when {
+    mb <= 0 -> "Off"
+    mb >= 1024 -> "${mb / 1024} GB"
+    else -> "$mb MB"
+}
+
 /** What happened while the last video started: helps tell ad-related delays from other ones. */
 @Composable
-private fun DiagnosticsCard(lastStart: StartDiagnostics?, pipPauses: Pair<Int, Int>, recentBlocked: List<String>) {
+private fun DiagnosticsCard(
+    lastStart: StartDiagnostics?,
+    pipPauses: Pair<Int, Int>,
+    tapFixes: Pair<Int, String>,
+    recentBlocked: List<String>,
+    showStartTime: Boolean,
+    onToggleShowStartTime: (Boolean) -> Unit
+) {
     SettingsSectionCard(title = "Diagnostics") {
+        SettingToggleRow(
+            icon = Icons.Default.Speed,
+            iconTint = ShieldCoral,
+            title = "Show start time",
+            subtitle = "A short note each time a video starts: how long it took and how many ads were removed",
+            checked = showStartTime,
+            onCheckedChange = onToggleShowStartTime,
+            testTag = "setting_show_start_time_switch"
+        )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
         if (lastStart == null) {
             Text(
                 text = "Play a video to see how long it took to start.",
@@ -314,10 +459,15 @@ private fun DiagnosticsCard(lastStart: StartDiagnostics?, pipPauses: Pair<Int, I
                 "Time in ad state",
                 if (lastStart.adMs > 0) String.format(Locale.US, "%.1f s", lastStart.adMs / 1000.0) else "none"
             )
+            DiagnosticLine("17 s player timers skipped", lastStart.timersBoosted.toString())
         }
         if (pipPauses.first > 0 || pipPauses.second > 0) {
             DiagnosticLine("PiP: page pauses refused", pipPauses.first.toString())
             DiagnosticLine("PiP: system pauses", pipPauses.second.toString())
+        }
+        if (tapFixes.first > 0) {
+            DiagnosticLine("Play/pause taps the page missed (fixed)", tapFixes.first.toString())
+            DiagnosticLine("On top of the button", tapFixes.second.ifBlank { "?" })
         }
         if (recentBlocked.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))

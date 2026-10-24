@@ -1,5 +1,7 @@
-# Builds a debug APK on every push to main (and on demand from the Actions tab).
-# The APK is attached to the workflow run as the "StreamShield-debug-apk" artifact.
+# Builds a debug APK on every push to main, on pull requests, and on demand from the Actions tab.
+# The APK is attached to the workflow run as the "StreamShield-debug-apk" artifact and (except for
+# pull requests) published as the "latest" release, whose download link needs no GitHub account
+# when the repository is public.
 name: Build APK
 
 on:
@@ -16,6 +18,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write   # replace the "latest" release
     steps:
       - uses: actions/checkout@v4
 
@@ -48,12 +52,32 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
 
+      - name: Name the APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/StreamShield.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: StreamShield-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: dist/StreamShield.apk
           if-no-files-found: error
+
+      # One fixed link for phones: Releases -> latest -> StreamShield.apk. Recreated each time so
+      # the tag points at the commit that was built.
+      - name: Publish the "latest" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create latest dist/StreamShield.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "StreamShield (latest build)" \
+            --notes "Built from ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). On the phone: download StreamShield.apk, open it, and allow installing from this source. It installs over an earlier build only if both were signed with the same key (see README, Signing)."
 
       - name: Unit tests
         run: gradle --no-daemon testDebugUnitTest

@@ -16,3 +16,7 @@
 local.properties
 .env
 debug.keystore
+# Google AI Studio's own build output and signing key (do not publish the key)
+.build-outputs/
+debug.keystore.base64
+DEBUG_KEYSTORE_BASE64.txt

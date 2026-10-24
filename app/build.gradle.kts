@@ -13,7 +13,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.streamshield.vqxkpl"
+    applicationId = "com.aistudio.streamshield.vytkzp"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
@@ -56,8 +56,18 @@ android {
     }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    // Java 17, as NewPipe uses: NewPipe Extractor contains Java records, which D8 has to
+    // desugar for older Android versions.
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    // NewPipe Extractor uses java.time / java.nio APIs that need desugaring below Android 13.
+    isCoreLibraryDesugaringEnabled = true
+  }
+  packaging {
+    resources {
+      // Duplicate files from jsoup / other libraries.
+      excludes += setOf("META-INF/README.md", "META-INF/CHANGES", "META-INF/COPYRIGHT")
+    }
   }
   buildFeatures {
     compose = true
@@ -107,7 +117,12 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.androidx.webkit)
-  // implementation(libs.coil.compose)
+  implementation(libs.androidx.work.runtime.ktx)
+  implementation(libs.androidx.media3.exoplayer)
+  implementation(libs.androidx.media3.ui)
+  implementation(libs.newpipe.extractor)
+  coreLibraryDesugaring(libs.desugar.jdk.libs.nio)
+  implementation(libs.coil.compose)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

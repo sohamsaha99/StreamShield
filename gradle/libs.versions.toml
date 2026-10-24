@@ -36,6 +36,11 @@ moshiKotlinCodegen = "1.15.2"
 datastorePreferences = "1.1.7"
 media = "1.7.0"
 webkit = "1.12.1"
+work = "2.10.0"
+media3 = "1.6.1"
+desugarJdkLibs = "2.1.5"
+# NewPipe Extractor from JitPack, pinned to the commit NewPipe itself uses (2026-10-21).
+newpipeExtractor = "e8f89145a830b4d6cae32412007f24ea8b36c73a"
 robolectric = "4.16.1"
 firebaseBom = "34.17.0"
 secretsGradlePlugin = "2.0.1"
@@ -87,6 +92,11 @@ moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.re
 moshi-kotlin-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-codegen", version.ref = "moshiKotlinCodegen" }
 androidx-media = { group = "androidx.media", name = "media", version.ref = "media" }
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
+androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
+androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
+desugar-jdk-libs-nio = { group = "com.android.tools", name = "desugar_jdk_libs_nio", version.ref = "desugarJdkLibs" }
+newpipe-extractor = { group = "com.github.TeamNewPipe", name = "NewPipeExtractor", version.ref = "newpipeExtractor" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastorePreferences" }
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }

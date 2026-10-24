@@ -4,13 +4,53 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.data.BookmarkEntity
+import com.example.data.AutoBackupWorker
+import com.example.data.BackupFolder
+import com.example.data.BackupManager
+import com.example.data.BackupSummary
+import com.example.data.ImportMode
+import com.example.data.BuiltInPlaylist
+import com.example.data.FeedItemEntity
+import com.example.data.FeedbackType
+import com.example.data.LibraryRepository
+import com.example.data.PlaylistKind
+import com.example.data.PlaylistSummary
+import com.example.data.PlaylistVideo
+import com.example.data.SearchHistoryEntity
 import com.example.data.ShieldPreferencesState
 import com.example.data.StreamShieldDatabase
+import com.example.data.SubscriptionEntity
+import com.example.data.SubscriptionRefresher
+import com.example.data.TakeoutSubscriptionsParser
 import com.example.data.UserPreferencesRepository
-import com.example.data.WatchHistoryEntity
+import com.example.data.WatchedVideo
 import com.example.data.WebVideoState
+import com.example.data.isYouTubeVideoPage
+import com.example.data.extractYouTubeVideoId
+import com.example.data.watchUrl
+import com.example.data.youTubeLinkOrNull
+import com.example.data.OfflineItemEntity
+import com.example.data.OfflineOrigin
+import com.example.data.OfflineStatus
+import com.example.data.PlayEventEntity
+import com.example.data.SmartRemovedEntity
+import com.example.download.DownloadCatalog
+import com.example.download.DownloadErrors
+import com.example.download.DownloadWorker
+import com.example.download.OfflineDownloader
+import com.example.download.OfflineStorage
+import com.example.download.QualityOption
+import com.example.download.SmartDownloads
+import com.example.download.NewPipeSupport
+import com.example.recommend.ForYouRepository
+import com.example.recommend.ForYouVideo
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import com.example.engine.SponsorBlockClient
+import kotlinx.coroutines.channels.Channel
 import com.example.service.BackgroundPlaybackService
 import com.example.service.PlaybackCommand
 import com.example.service.PlaybackCommands
@@ -21,7 +61,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -30,6 +76,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 const val HOME_URL = "https://m.youtube.com"
+const val MUSIC_HOME_URL = "https://music.youtube.com"
 
 data class BrowserUiState(
     val url: String = HOME_URL,
@@ -50,26 +97,219 @@ data class StartDiagnostics(
     val startMs: Int,
     val adMs: Int,
     val adsPruned: Int,
-    val adBlockEnabled: Boolean
+    val adBlockEnabled: Boolean,
+    /** YouTube's 17 s player timers that were shortened (uBlock Origin rule). */
+    val timersBoosted: Int = 0
 )
 
+/**
+ * Bottom navigation tabs. They stay on screen for every browsing page (native screens, YouTube
+ * search results / channels / playlists, YouTube Music); only a YouTube video page hides them.
+ */
+enum class AppTab { HOME, MUSIC, SUBSCRIPTIONS, LIBRARY }
+
+/** Which player the media buttons, mini-player and notification belong to. */
+enum class PlaybackSource { WEB, OFFLINE }
+
+/** The browse page (search results, channels, playlists) shown inside a tab. */
+data class BrowsePageState(val url: String = "", val loading: Boolean = false)
+
+/** A video or song the user wants to download (what the screen knows about it). */
+data class DownloadTarget(
+    val videoId: String,
+    val title: String,
+    val channelName: String,
+    val channelId: String = "",
+    val durationSec: Int = 0,
+    val isMusic: Boolean = false
+)
+
+/** The quality sheet: options load from YouTube when it opens. */
+data class DownloadSheetState(
+    val target: DownloadTarget,
+    val loading: Boolean = true,
+    val options: List<QualityOption> = emptyList(),
+    val error: String? = null
+)
+
+/** Downloaded items to play, starting at [index]. */
+data class OfflinePlayRequest(val items: List<OfflineItemEntity>, val index: Int)
+
+/** Largest gap between two progress writes that still counts as listening (seconds). */
+private const val MAX_LISTEN_STEP_SEC = 45
+
+/** The opening-video placeholder goes away after this at most, or this long after the page loaded. */
+private const val PENDING_MAX_MS = 8_000L
+private const val PENDING_AFTER_LOAD_MS = 2_500L
+
+/** A refresh spinner on a web page stops after this at most. */
+private const val WEB_REFRESH_MAX_MS = 12_000L
+
+private val CHANNEL_ID_PATTERN = Regex("^UC[A-Za-z0-9_-]{22}$")
+
+/** Listening-log operations, applied in order by one consumer. */
+private sealed interface PlayLogOp {
+    data class Start(val videoId: String, val at: Long, val position: Int, val duration: Int, val isMusic: Boolean) : PlayLogOp
+    data class Progress(val videoId: String, val position: Int, val duration: Int, val ended: Boolean) : PlayLogOp
+}
+
+/** Screens inside the Library tab. */
+sealed interface LibraryRoute {
+    data object Root : LibraryRoute
+    data object History : LibraryRoute
+    data object Downloads : LibraryRoute
+    data class Playlist(val id: Long) : LibraryRoute
+}
+
+/** Which web page a pull-down gesture happened in. */
+enum class PullSource { PLAYER, BROWSE }
+
+/** A pull-down in progress on a web page ([distance] in CSS px, about dp). */
+data class WebPull(val source: PullSource, val mode: String, val distance: Float)
+
+/** A video the player is opening: shown as a placeholder (thumbnail, title) until it starts. */
+data class PendingVideo(val videoId: String, val title: String, val channel: String)
+
+/** A channel as YouTube's page knows it (Subscribe button): id and/or path (/@name). */
+data class PageChannel(val id: String, val path: String, val name: String)
+
+/** "Unsubscribe from ...?" for a Subscribed button tapped on a YouTube page. */
+data class UnsubscribeRequest(val channelId: String, val name: String)
+
+/** Taps on the page's play/pause button that the page missed (this session), for diagnostics. */
+data class TapFixInfo(val count: Int = 0, val lastTop: String = "")
+
+/** Pull distance (dp) at which a release refreshes; the indicator moves at half the finger. */
+const val PULL_REFRESH_THRESHOLD_DP = 72f
+const val PULL_DRAG_RATE = 0.5f
+
+/** Subscription feed refresh status shown in the Subscriptions tab. */
+data class FeedRefreshState(val running: Boolean = false, val lastMessage: String? = null)
+
+/** A backup file that was picked for import, waiting for Merge / Replace. */
+data class PendingImport(val text: String, val summary: BackupSummary)
+
+/** What the native actions sheet knows about the video currently open in the player. */
+data class CurrentVideoActions(
+    val videoId: String = "",
+    val title: String = "",
+    val channelId: String = "",
+    val channelName: String = "",
+    val subscribed: Boolean = false,
+    val liked: Boolean = false,
+    val inWatchLater: Boolean = false,
+    val notInterested: Boolean = false,
+    val playlistIds: Set<Long> = emptySet()
+)
+
+@OptIn(ExperimentalCoroutinesApi::class)
 class StreamShieldViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = StreamShieldDatabase.getInstance(application)
     private val prefsRepo = UserPreferencesRepository(application)
     private val sponsorBlock = SponsorBlockClient()
+    private val library = LibraryRepository(database.libraryDao())
+    private val refresher = SubscriptionRefresher(library)
+    private val backup = BackupManager(database, prefsRepo)
+    private val offlineDao = database.offlineDao()
 
     // Eager: the page script reads the current config synchronously at document start.
     val preferences: StateFlow<ShieldPreferencesState> = prefsRepo.preferencesFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, ShieldPreferencesState())
 
-    val bookmarks: StateFlow<List<BookmarkEntity>> = database.bookmarkDao()
-        .observeAllBookmarks()
+    // ---- local library ----
+    val history: StateFlow<List<WatchedVideo>> = library.history()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val watchHistory: StateFlow<List<WatchHistoryEntity>> = database.watchHistoryDao()
-        .observeRecentHistory()
+    /** Started but not finished videos (not music), newest first. */
+    val continueWatching: StateFlow<List<WatchedVideo>> = history
+        .map { list -> list.filter { !it.isMusic && it.durationSec > 0 && it.watchedFraction in 0.05f..0.9f }.take(15) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val subscriptions: StateFlow<List<SubscriptionEntity>> = library.subscriptions
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val feed: StateFlow<List<FeedItemEntity>> = library.feed()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val playlists: StateFlow<List<PlaylistSummary>> = library.playlists
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val recentSearches: StateFlow<List<SearchHistoryEntity>> = library.recentSearches()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Requests for the activity to load a URL in the WebView (the controller lives there).
+    private val _openUrlRequests = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val openUrlRequests: kotlinx.coroutines.flow.SharedFlow<String> = _openUrlRequests
+
+    private val _pendingImport = MutableStateFlow<PendingImport?>(null)
+    val pendingImport: StateFlow<PendingImport?> = _pendingImport.asStateFlow()
+
+    private val _feedRefresh = MutableStateFlow(FeedRefreshState())
+    val feedRefresh: StateFlow<FeedRefreshState> = _feedRefresh.asStateFlow()
+
+    // ---- navigation ----
+    private val _currentTab = MutableStateFlow(AppTab.HOME)
+    val currentTab: StateFlow<AppTab> = _currentTab.asStateFlow()
+
+    /**
+     * True while the YouTube page is shown instead of the native tab screens. A video page then
+     * fills the screen with the player controls; any other page (search results, channel...)
+     * keeps the app's tabs under it. False shows the native screens (and the mini-player).
+     */
+    private val _playerExpanded = MutableStateFlow(false)
+    val playerExpanded: StateFlow<Boolean> = _playerExpanded.asStateFlow()
+
+    /**
+     * The page the WebView shows or is about to show: set as soon as the app asks for a page (so the
+     * screen layout does not flash the previous page's layout) and updated on every navigation.
+     */
+    private val _webPageUrl = MutableStateFlow(HOME_URL)
+    val webPageUrl: StateFlow<String> = _webPageUrl.asStateFlow()
+
+    /**
+     * The tab currently showing the browse page instead of its own screen (null: none). Opening
+     * a search or channel puts the browse page into the current tab; tapping that tab again, or
+     * Back from the first page, returns to the tab's own screen.
+     */
+    private val _browseTab = MutableStateFlow<AppTab?>(null)
+    val browseTab: StateFlow<AppTab?> = _browseTab.asStateFlow()
+
+    private val _browsePage = MutableStateFlow(BrowsePageState())
+    val browsePage: StateFlow<BrowsePageState> = _browsePage.asStateFlow()
+
+    // Requests for the activity to load a URL in the browse page.
+    private val _browseRequests = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val browseRequests: kotlinx.coroutines.flow.SharedFlow<String> = _browseRequests
+
+    private val _playbackSource = MutableStateFlow(PlaybackSource.WEB)
+    val playbackSource: StateFlow<PlaybackSource> = _playbackSource.asStateFlow()
+
+    // ---- downloads ----
+    val offlineItems: StateFlow<List<OfflineItemEntity>> = offlineDao.observeItems()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val _downloadSheet = MutableStateFlow<DownloadSheetState?>(null)
+    val downloadSheet: StateFlow<DownloadSheetState?> = _downloadSheet.asStateFlow()
+
+    private val _offlinePlayRequests = kotlinx.coroutines.flow.MutableSharedFlow<OfflinePlayRequest>(extraBufferCapacity = 2)
+    val offlinePlayRequests: kotlinx.coroutines.flow.SharedFlow<OfflinePlayRequest> = _offlinePlayRequests
+
+    /** The offline player fills the screen (true) or shows as the mini-player (false). */
+    private val _offlineExpanded = MutableStateFlow(false)
+    val offlineExpanded: StateFlow<Boolean> = _offlineExpanded.asStateFlow()
+
+    private val playLog = Channel<PlayLogOp>(Channel.UNLIMITED)
+
+    private val _libraryRoute = MutableStateFlow<LibraryRoute>(LibraryRoute.Root)
+    val libraryRoute: StateFlow<LibraryRoute> = _libraryRoute.asStateFlow()
+
+    private val _showActionsSheet = MutableStateFlow(false)
+    val showActionsSheet: StateFlow<Boolean> = _showActionsSheet.asStateFlow()
+
+    /** Video id the user closed the mini-player for; it stays hidden until another video plays. */
+    private val _miniPlayerDismissedFor = MutableStateFlow("")
+    val miniPlayerDismissedFor: StateFlow<String> = _miniPlayerDismissedFor.asStateFlow()
 
     private val _browserState = MutableStateFlow(BrowserUiState())
     val browserState: StateFlow<BrowserUiState> = _browserState.asStateFlow()
@@ -77,8 +317,32 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _videoState = MutableStateFlow(WebVideoState())
     val videoState: StateFlow<WebVideoState> = _videoState.asStateFlow()
 
-    private val _omniboxInput = MutableStateFlow(HOME_URL)
-    val omniboxInput: StateFlow<String> = _omniboxInput.asStateFlow()
+    val playlistItemsFlow: (Long) -> kotlinx.coroutines.flow.Flow<List<PlaylistVideo>> = { id -> library.playlistVideos(id) }
+
+    private val currentVideoId = _videoState.map { it.videoId }.distinctUntilChanged()
+
+    val currentVideoActions: StateFlow<CurrentVideoActions> = combine(
+        _videoState,
+        library.subscribedIds,
+        currentVideoId.flatMapLatest { id -> if (id.isBlank()) flowOf(emptyList()) else library.playlistsContaining(id) },
+        library.feedbackTargets(FeedbackType.NOT_INTERESTED),
+        playlists
+    ) { video, subscribed, containing, notInterested, lists ->
+        val likedId = lists.firstOrNull { it.builtIn == BuiltInPlaylist.LIKED.name }?.id
+        val laterId = lists.firstOrNull { it.builtIn == BuiltInPlaylist.WATCH_LATER.name }?.id
+        val ids = containing.toSet()
+        CurrentVideoActions(
+            videoId = video.videoId,
+            title = video.title,
+            channelId = video.channelId,
+            channelName = video.channel,
+            subscribed = video.channelId.isNotBlank() && video.channelId in subscribed,
+            liked = likedId != null && likedId in ids,
+            inWatchLater = laterId != null && laterId in ids,
+            notInterested = video.videoId in notInterested,
+            playlistIds = ids
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CurrentVideoActions())
 
     private val _showSettings = MutableStateFlow(false)
     val showSettings: StateFlow<Boolean> = _showSettings.asStateFlow()
@@ -91,6 +355,65 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     private val _isInPipMode = MutableStateFlow(false)
     val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
+
+    /** The app is on screen (between the activity's onStart and onStop). */
+    private val _appVisible = MutableStateFlow(true)
+    val appVisible: StateFlow<Boolean> = _appVisible.asStateFlow()
+
+    fun setAppVisible(visible: Boolean) {
+        _appVisible.value = visible
+        if (visible && _currentTab.value == AppTab.HOME) refreshForYou(force = false)
+    }
+
+    // ---- For you (Home) ----
+    private val forYou = ForYouRepository(application)
+    val forYouState: StateFlow<ForYouRepository.State> = forYou.state
+    private val _homeRefreshing = MutableStateFlow(false)
+    val homeRefreshing: StateFlow<Boolean> = _homeRefreshing.asStateFlow()
+    private var homeRefreshJob: Job? = null
+
+    // ---- pull-down on web pages ----
+    private val _webPull = MutableStateFlow<WebPull?>(null)
+    val webPull: StateFlow<WebPull?> = _webPull.asStateFlow()
+    private val _webRefreshing = MutableStateFlow<PullSource?>(null)
+    val webRefreshing: StateFlow<PullSource?> = _webRefreshing.asStateFlow()
+    private val _reloadRequests = MutableSharedFlow<PullSource>(extraBufferCapacity = 2)
+    val reloadRequests: SharedFlow<PullSource> = _reloadRequests
+    private var refreshSawLoading = false
+    private var refreshTimeoutJob: Job? = null
+
+    /** What a pull-down does on the player page: minimize a video, refresh YouTube Music. */
+    val playerPullMode: StateFlow<String> by lazy {
+        combine(_playerExpanded, _webPageUrl, _browserState, _currentTab) { expanded, pageUrl, browser, tab ->
+            when {
+                expanded && isYouTubeVideoPage(pageUrl) -> "minimize"
+                !expanded && tab == AppTab.MUSIC && browser.url.startsWith(MUSIC_HOME_URL) -> "refresh"
+                else -> "off"
+            }
+        }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.Eagerly, "off")
+    }
+
+    // ---- opening a video: placeholder until it plays ----
+    private val _pendingVideo = MutableStateFlow<PendingVideo?>(null)
+    val pendingVideo: StateFlow<PendingVideo?> = _pendingVideo.asStateFlow()
+    private var pendingVideoJob: Job? = null
+
+    // ---- Subscribe buttons on YouTube pages ----
+    private val _unsubscribeRequest = MutableStateFlow<UnsubscribeRequest?>(null)
+    val unsubscribeRequest: StateFlow<UnsubscribeRequest?> = _unsubscribeRequest.asStateFlow()
+    private val _subscriptionsChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    /** The pages re-check their Subscribe buttons when this fires. */
+    val subscriptionsChanged: SharedFlow<Unit> = _subscriptionsChanged
+    /** Read on the pages' JavaScript bridge threads. */
+    @Volatile
+    private var subscribedSnapshot: Set<String> = emptySet()
+    /** "/@name" (lowercase) -> channel id, learned when a handle is resolved. */
+    private val channelHandles = ConcurrentHashMap<String, String>()
+
+    // ---- diagnostics ----
+    private val _tapFixes = MutableStateFlow(TapFixInfo())
+    val tapFixes: StateFlow<TapFixInfo> = _tapFixes.asStateFlow()
+    private var pageTapFixes = 0
 
     private val _lastStart = MutableStateFlow<StartDiagnostics?>(null)
     val lastStart: StateFlow<StartDiagnostics?> = _lastStart.asStateFlow()
@@ -114,10 +437,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private var sponsorJob: Job? = null
     private var bgSessionActive = false
     private var lastBgSignature = ""
-    private var lastHistoryKey = ""
 
     init {
-        seedInitialBookmarksIfEmpty()
+        viewModelScope.launch(Dispatchers.IO) {
+            SmartDownloads.schedule(getApplication(), prefsRepo.preferencesFlow.first().smartSizeMb)
+        }
+        viewModelScope.launch(Dispatchers.IO) { consumePlayLog() }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (prefsRepo.preferencesFlow.first().autoBackupEnabled) AutoBackupWorker.schedule(getApplication(), true)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            library.ensureBuiltInPlaylists()
+            // Refresh subscriptions on start if the last refresh is older than an hour.
+            val subs = library.allSubscriptions()
+            val oldest = subs.minOfOrNull { it.lastRefreshedAt } ?: Long.MAX_VALUE
+            if (subs.isNotEmpty() && System.currentTimeMillis() - oldest > 60 * 60_000L) refreshFeeds()
+        }
         viewModelScope.launch {
             PlaybackCommands.flow.collect { command ->
                 if (command == PlaybackCommand.STOP) {
@@ -126,40 +461,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
         }
-    }
-
-    private fun seedInitialBookmarksIfEmpty() {
         viewModelScope.launch {
-            if (database.bookmarkDao().countBookmarks() == 0) {
-                val defaults = listOf(
-                    BookmarkEntity(title = "Home", url = HOME_URL, category = "Home"),
-                    BookmarkEntity(title = "Subscriptions", url = "$HOME_URL/feed/subscriptions", category = "Home"),
-                    BookmarkEntity(title = "Lo-Fi", url = "$HOME_URL/results?search_query=lofi+hip+hop+radio", category = "Music")
-                )
-                defaults.forEach { database.bookmarkDao().insertBookmark(it) }
+            library.subscribedIds.collect { ids ->
+                subscribedSnapshot = ids
+                _subscriptionsChanged.tryEmit(Unit)
             }
+        }
+        viewModelScope.launch(Dispatchers.IO) { loadChannelHandles() }
+        viewModelScope.launch(Dispatchers.IO) {
+            forYou.load()
+            refreshForYou(force = false)
         }
     }
 
     // ---------------------------------------------------------------------------------------
     // Navigation & page state
     // ---------------------------------------------------------------------------------------
-
-    /** Turns omnibox text into a URL: full URLs pass through, anything else is a YouTube search. */
-    fun resolveOmniboxInput(rawInput: String): String? {
-        val trimmed = rawInput.trim()
-        if (trimmed.isEmpty()) return null
-        return when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
-            trimmed.startsWith("youtube.com/") || trimmed.startsWith("m.youtube.com/") ||
-                trimmed.startsWith("www.youtube.com/") || trimmed.startsWith("youtu.be/") -> "https://$trimmed"
-            else -> "$HOME_URL/results?search_query=${Uri.encode(trimmed)}"
-        }
-    }
-
-    fun updateOmniboxInput(input: String) {
-        _omniboxInput.value = input
-    }
 
     fun onPageChanged(url: String, title: String?, canBack: Boolean, canForward: Boolean, loading: Boolean) {
         val previousUrl = _browserState.value.url
@@ -170,22 +487,97 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             canGoBack = canBack,
             canGoForward = canForward
         )
-        if (url != previousUrl) _omniboxInput.value = url
+        if (url != previousUrl) {
+            _webPageUrl.value = url
+            handleSearchPage(url)
+        }
+        if (_webRefreshing.value == PullSource.PLAYER) onRefreshLoading(loading)
+        val pending = _pendingVideo.value
+        if (pending != null && !loading && extractYouTubeVideoId(url) == pending.videoId) {
+            // The page is there; if the video does not start on its own, show the page anyway.
+            schedulePendingClear(PENDING_AFTER_LOAD_MS)
+        }
+    }
+
+    /** YouTube logo (or an in-page link to YouTube's home page): the app's Home tab instead. */
+    fun onHomeLogoTapped() {
+        if (_currentTab.value == AppTab.MUSIC && !_playerExpanded.value && _browserState.value.url.startsWith(MUSIC_HOME_URL)) return
+        _browseTab.value = null
+        _playerExpanded.value = false
+        _showActionsSheet.value = false
+        _currentTab.value = AppTab.HOME
+    }
+
+    /** Page changes in the browse page (loading bar, searches typed into YouTube's search box). */
+    fun onBrowsePageChanged(url: String, loading: Boolean) {
+        val previous = _browsePage.value.url
+        _browsePage.value = BrowsePageState(url, loading)
+        if (url != previous) handleSearchPage(url)
+        if (_webRefreshing.value == PullSource.BROWSE) onRefreshLoading(loading)
+    }
+
+    private var lastSearchRedirect = ""
+
+    /**
+     * Searches typed into YouTube's or YouTube Music's own search box land on a results page.
+     * If the "query" is really a pasted link, open the link instead; otherwise remember the query
+     * (search history feeds recommendations).
+     */
+    private fun handleSearchPage(url: String) {
+        val uri = try { Uri.parse(url) } catch (_: Exception) { return }
+        val query = when {
+            uri.host == "music.youtube.com" && uri.path == "/search" -> uri.getQueryParameter("q")
+            uri.path == "/results" -> uri.getQueryParameter("search_query")
+            else -> null
+        }?.trim().orEmpty()
+        if (query.isEmpty()) return
+        val link = youTubeLinkOrNull(query)
+        if (link != null) {
+            if (link != lastSearchRedirect) {
+                lastSearchRedirect = link
+                openLink(link)
+            }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) { library.recordSearch(query) }
     }
 
     fun onVideoState(state: WebVideoState) {
+        if (_playbackSource.value != PlaybackSource.WEB) {
+            // While a download plays, the (paused) web player's reports are not the current video,
+            // unless the web page starts playing (e.g. a song tapped in YouTube Music): then it
+            // takes over the mini-player, notification and media buttons.
+            if (!state.isPlaying || state.videoId.isBlank()) return
+            switchToWebPlayback()
+        }
+        applyVideoState(state)
+    }
+
+    private fun applyVideoState(state: WebVideoState) {
         val previous = _videoState.value
         _videoState.value = state
 
+        _pendingVideo.value?.let { pending ->
+            if (state.videoId == pending.videoId && (state.isPlaying || state.positionSec > 0 || state.ended)) clearPendingVideo()
+        }
+        if (state.tapFixes < pageTapFixes) pageTapFixes = 0   // a new page counts from zero
+        if (state.tapFixes > pageTapFixes) {
+            _tapFixes.value = TapFixInfo(_tapFixes.value.count + (state.tapFixes - pageTapFixes), state.tapFixTop)
+            pageTapFixes = state.tapFixes
+        }
+
         if (state.startMs >= 0 && (state.videoId != previous.videoId || previous.startMs < 0)) {
-            _lastStart.value = StartDiagnostics(
+            val start = StartDiagnostics(
                 title = state.title,
                 loadMs = state.loadMs,
                 startMs = state.startMs,
                 adMs = state.adMs,
                 adsPruned = state.adsPruned,
-                adBlockEnabled = preferences.value.adBlockEnabled
+                adBlockEnabled = preferences.value.adBlockEnabled,
+                timersBoosted = state.timersBoosted
             )
+            _lastStart.value = start
+            if (preferences.value.showStartTime && !_isInPipMode.value && !state.isMusicPage) showStartNote(start)
         }
 
         if (state.videoId.isNotBlank() && state.videoId != previous.videoId) {
@@ -193,18 +585,123 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             if (!prefs.rememberSpeedAcrossVideos && previous.videoId.isNotBlank() && prefs.playbackSpeed != 1.0f) {
                 setPlaybackSpeed(1.0f)
             }
-            loadSponsorSegments(state.videoId)
+            if (_playbackSource.value == PlaybackSource.WEB) loadSponsorSegments(state.videoId)
         }
 
-        if (state.isPlaying && state.videoId.isNotBlank() && state.title.isNotBlank()) {
-            val key = "${state.videoId}|${state.title}"
-            if (key != lastHistoryKey) {
-                lastHistoryKey = key
-                recordHistory("$HOME_URL/watch?v=${state.videoId}", state.title, state.channel)
-            }
-        }
+        recordProgress(previous, state)
 
         syncBackgroundService(state)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Watch history (batched: on start, pause, end, video change and at most every 15 s)
+    // ---------------------------------------------------------------------------------------
+
+    private var progressVideoId = ""
+    private var lastProgressWriteAt = 0L
+    private var lastWrittenPosition = -1
+    private var metadataWrittenFor = ""
+
+    private fun recordProgress(previous: WebVideoState, state: WebVideoState) {
+        if (preferences.value.historyPaused) return
+        val id = state.videoId
+        if (id.isBlank()) return
+        val newVideo = id != progressVideoId
+        // A video counts once it has actually played.
+        if (newVideo && !state.isPlaying) return
+
+        // Leaving the previous video: store where it was left.
+        if (newVideo && progressVideoId.isNotBlank() && previous.videoId == progressVideoId &&
+            previous.positionSec != lastWrittenPosition
+        ) {
+            writeProgress(previous, newSession = false)
+        }
+
+        val now = System.currentTimeMillis()
+        val pausedOrEnded = (previous.isPlaying && !state.isPlaying) || (state.ended && !previous.ended)
+        val due = now - lastProgressWriteAt >= 15_000L
+        val metadataArrived = state.channelId.isNotBlank() && metadataWrittenFor != id
+        if (!newVideo && !pausedOrEnded && !metadataArrived && !(due && state.positionSec != lastWrittenPosition)) return
+
+        progressVideoId = id
+        lastProgressWriteAt = now
+        writeProgress(state, newSession = newVideo)
+    }
+
+    private fun writeProgress(state: WebVideoState, newSession: Boolean) {
+        val duration = state.bestDurationSec
+        val position = if (state.ended && duration > 0) duration else state.positionSec
+        lastWrittenPosition = state.positionSec
+        val writeMetadata = newSession || (state.channelId.isNotBlank() && metadataWrittenFor != state.videoId)
+        if (state.channelId.isNotBlank()) metadataWrittenFor = state.videoId
+        val snapshot = state
+        viewModelScope.launch(Dispatchers.IO) {
+            if (writeMetadata) {
+                library.rememberVideo(
+                    videoId = snapshot.videoId,
+                    title = snapshot.title,
+                    channelId = snapshot.channelId,
+                    channelName = snapshot.channel,
+                    durationSec = duration,
+                    viewCount = snapshot.viewCount,
+                    isMusic = snapshot.isMusic
+                )
+            }
+            library.recordProgress(snapshot.videoId, position, duration, snapshot.isMusic, newSession)
+        }
+        playLog.trySend(
+            if (newSession) {
+                PlayLogOp.Start(state.videoId, System.currentTimeMillis(), position, duration, state.isMusic)
+            } else {
+                PlayLogOp.Progress(state.videoId, position, duration, state.ended)
+            }
+        )
+    }
+
+    /**
+     * The listening log used by smart downloads: one row per play with how far it got. A single
+     * consumer applies the operations in order (start of a play, then its progress updates).
+     */
+    private suspend fun consumePlayLog() {
+        var playId = -1L
+        var playVideo = ""
+        var lastPosition = 0
+        var listened = 0
+        for (op in playLog) {
+            try {
+                when (op) {
+                    is PlayLogOp.Start -> {
+                        playVideo = op.videoId
+                        lastPosition = op.position
+                        listened = 0
+                        playId = offlineDao.insertPlay(
+                            PlayEventEntity(
+                                videoId = op.videoId,
+                                startedAt = op.at,
+                                listenedSec = 0,
+                                durationSec = op.duration,
+                                completed = false,
+                                isMusic = op.isMusic
+                            )
+                        )
+                    }
+                    is PlayLogOp.Progress -> {
+                        if (op.videoId != playVideo || playId < 0) continue
+                        // Progress is written at most every ~15-20 s while playing; a bigger jump
+                        // is a seek and does not count as listening.
+                        val step = op.position - lastPosition
+                        if (step in 1..MAX_LISTEN_STEP_SEC) listened += step
+                        lastPosition = op.position
+                        val completed = (op.duration > 0 && listened >= 0.8 * op.duration) ||
+                            (op.ended && op.duration > 0 && listened >= 0.5 * op.duration)
+                        val counted = if (op.duration > 0) minOf(listened, op.duration) else listened
+                        offlineDao.updatePlay(playId, counted, op.duration, completed)
+                    }
+                }
+            } catch (_: Exception) {
+                // The log is best effort; a failed write must not stop the consumer.
+            }
+        }
     }
 
     private fun loadSponsorSegments(videoId: String) {
@@ -318,14 +815,34 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         _showSpeedSheet.value = false
     }
 
-    fun showBanner(message: String) {
+    fun showBanner(message: String) = showBannerFor(message, 2500L)
+
+    private fun showBannerFor(message: String, durationMs: Long) {
         bannerJob?.cancel()
         _statusBanner.value = message
         bannerJob = viewModelScope.launch {
-            delay(2500L)
+            delay(durationMs)
             _statusBanner.value = null
         }
     }
+
+    /**
+     * "Started in 1.3 s · data 0.9 s · 3 ads removed": shown when a video starts (Settings →
+     * Diagnostics can turn it off). "data" is when the video's data was loaded; a long gap after
+     * it means the player waited.
+     */
+    private fun startTimeNote(start: StartDiagnostics): String = buildString {
+        append("Started in ").append(seconds(start.startMs))
+        if (start.loadMs >= 0) append(" · data ").append(seconds(start.loadMs))
+        append(" · ").append(start.adsPruned).append(if (start.adsPruned == 1) " ad removed" else " ads removed")
+        if (start.adMs > 0) append(" · ").append(seconds(start.adMs)).append(" in ad")
+        if (start.timersBoosted > 0) append(" · timer skipped")
+        if (!start.adBlockEnabled) append(" · ad shield off")
+    }
+
+    private fun seconds(ms: Int): String = String.format(java.util.Locale.US, "%.1f s", ms / 1000.0)
+
+    private fun showStartNote(start: StartDiagnostics) = showBannerFor(startTimeNote(start), 4000L)
 
     fun dismissBanner() {
         _statusBanner.value = null
@@ -374,6 +891,14 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    fun toggleShowStartTime(enabled: Boolean) {
+        viewModelScope.launch { prefsRepo.setShowStartTime(enabled) }
+    }
+
+    fun toggleAutoplay(enabled: Boolean) {
+        viewModelScope.launch { prefsRepo.setAutoplay(enabled) }
+    }
+
     fun toggleAutoPip(enabled: Boolean) {
         viewModelScope.launch { prefsRepo.setAutoPipOnLeave(enabled) }
     }
@@ -383,46 +908,828 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     }
 
     // ---------------------------------------------------------------------------------------
-    // Bookmarks & history
+    // History
     // ---------------------------------------------------------------------------------------
 
-    fun addCurrentPageBookmark() {
-        val page = _browserState.value
-        val video = _videoState.value
-        val onVideo = video.videoId.isNotBlank() && page.url.contains(video.videoId)
-        val title = (if (onVideo) video.title else page.title.removeSuffix(" - YouTube"))
-            .ifBlank { "YouTube" }
-            .take(40)
-        viewModelScope.launch {
-            database.bookmarkDao().insertBookmark(
-                BookmarkEntity(title = title, url = page.url, category = "Saved")
-            )
-            showBanner("Bookmarked")
-        }
-    }
-
-    fun deleteBookmark(id: Long) {
-        viewModelScope.launch { database.bookmarkDao().deleteBookmarkById(id) }
-    }
-
     fun clearWatchHistory() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            library.clearHistory()
+            offlineDao.clearPlays()
             database.watchHistoryDao().clearAllHistory()
             showBanner("Watch history cleared")
         }
     }
 
-    private fun recordHistory(url: String, title: String, channel: String) {
+    fun deleteHistoryEntry(videoId: String) {
+        viewModelScope.launch(Dispatchers.IO) { library.deleteHistoryEntry(videoId) }
+    }
+
+    fun toggleHistoryPaused(paused: Boolean) {
         viewModelScope.launch {
-            database.watchHistoryDao().upsertHistory(
-                WatchHistoryEntity(
-                    videoUrl = url,
-                    title = title,
-                    channelName = channel,
-                    playbackSpeedUsed = preferences.value.playbackSpeed
+            prefsRepo.setHistoryPaused(paused)
+            showBanner(if (paused) "History paused" else "History on")
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Navigation
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Opens a YouTube page: videos (and YouTube Music) in the player page, everything else
+     * (results, channels, playlists) in the browse page.
+     */
+    fun openInPlayer(url: String) {
+        if (!isYouTubeVideoPage(url) && !url.startsWith(MUSIC_HOME_URL)) {
+            openBrowse(url)
+            return
+        }
+        switchToWebPlayback()
+        _showSettings.value = false
+        val id = extractYouTubeVideoId(url)
+        if (id != null && isYouTubeVideoPage(url) && id != _videoState.value.videoId) {
+            val known = knownVideo(id)
+            _pendingVideo.value = PendingVideo(id, known?.first.orEmpty(), known?.second.orEmpty())
+            schedulePendingClear(PENDING_MAX_MS)
+        }
+        _playerExpanded.value = true
+        _webPageUrl.value = url
+        _openUrlRequests.tryEmit(url)
+    }
+
+    /** Title and channel of a video the app already lists somewhere (For you, feed, history). */
+    private fun knownVideo(videoId: String): Pair<String, String>? {
+        forYouState.value.items.firstOrNull { it.videoId == videoId }?.let { return it.title to it.channelName }
+        feed.value.firstOrNull { it.videoId == videoId }?.let { return it.title to it.channelName }
+        history.value.firstOrNull { it.videoId == videoId }?.let { return it.title to it.channelName }
+        return null
+    }
+
+    private fun schedulePendingClear(afterMs: Long) {
+        pendingVideoJob?.cancel()
+        pendingVideoJob = viewModelScope.launch {
+            delay(afterMs)
+            _pendingVideo.value = null
+        }
+    }
+
+    private fun clearPendingVideo() {
+        pendingVideoJob?.cancel()
+        _pendingVideo.value = null
+    }
+
+    fun openVideo(videoId: String, startSec: Int = 0) {
+        _miniPlayerDismissedFor.value = ""
+        openInPlayer(watchUrl(videoId, startSec))
+    }
+
+    /** A video tapped in the browse page (or a link): play it in the player page. */
+    fun openVideoUrl(url: String) {
+        _miniPlayerDismissedFor.value = ""
+        val link = youTubeLinkOrNull(url) ?: url
+        openInPlayer(link)
+    }
+
+    /** Shows [url] in the browse page inside the current tab (Music tab: Home). */
+    fun openBrowse(url: String) {
+        _showSettings.value = false
+        _playerExpanded.value = false
+        _showActionsSheet.value = false
+        val tab = if (_currentTab.value == AppTab.MUSIC) AppTab.HOME else _currentTab.value
+        _currentTab.value = tab
+        _browseTab.value = tab
+        _browsePage.value = BrowsePageState(url, loading = true)
+        _browseRequests.tryEmit(url)
+    }
+
+    /** Back from the first browse page: the tab's own screen again. */
+    fun closeBrowse() {
+        _browseTab.value = null
+    }
+
+    /** Search box: a pasted YouTube link opens directly, anything else is a YouTube search. */
+    fun search(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) return
+        val link = youTubeLinkOrNull(q)
+        if (link != null) {
+            openLink(link)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) { library.recordSearch(q) }
+        openBrowse("$HOME_URL/results?search_query=${Uri.encode(q)}")
+    }
+
+    /**
+     * Opens a YouTube / YouTube Music link (shared to the app, pasted into a search box): music
+     * links go to the Music tab, videos to the player page, other pages to the browse page.
+     */
+    fun openLink(url: String) {
+        _miniPlayerDismissedFor.value = ""
+        _showSettings.value = false
+        when {
+            url.startsWith(MUSIC_HOME_URL) -> {
+                switchToWebPlayback()
+                _webPageUrl.value = url
+                _currentTab.value = AppTab.MUSIC
+                _playerExpanded.value = false
+                _openUrlRequests.tryEmit(url)
+            }
+            isYouTubeVideoPage(url) -> openInPlayer(url)
+            else -> openBrowse(url)
+        }
+    }
+
+    fun deleteSearch(query: String) {
+        viewModelScope.launch(Dispatchers.IO) { library.deleteSearch(query) }
+    }
+
+    fun selectTab(tab: AppTab) {
+        val sameTab = tab == _currentTab.value
+        if (sameTab && tab == AppTab.LIBRARY) _libraryRoute.value = LibraryRoute.Root
+        // Tapping the tab that shows the browse page again: back to the tab's own screen.
+        if (sameTab && _browseTab.value == tab && !_playerExpanded.value) _browseTab.value = null
+        _currentTab.value = tab
+        _playerExpanded.value = false
+        if (tab == AppTab.HOME) refreshForYou(force = false)
+        if (tab == AppTab.MUSIC) {
+            // One page at a time: opening YouTube Music replaces the YouTube page. Do it right away
+            // unless a video is playing; then the Music tab asks first.
+            val onMusic = _browserState.value.url.startsWith(MUSIC_HOME_URL)
+            val video = _videoState.value
+            val videoPlaying = video.isPlaying && !video.isMusicPage
+            if (!onMusic && !videoPlaying) _openUrlRequests.tryEmit(MUSIC_HOME_URL)
+        }
+    }
+
+    fun openYouTubeMusic() {
+        switchToWebPlayback()
+        _currentTab.value = AppTab.MUSIC
+        _playerExpanded.value = false
+        _openUrlRequests.tryEmit(MUSIC_HOME_URL)
+    }
+
+    fun expandPlayer() {
+        _playerExpanded.value = true
+    }
+
+    fun collapsePlayer() {
+        _playerExpanded.value = false
+        _showActionsSheet.value = false
+        clearPendingVideo()
+    }
+
+    fun dismissMiniPlayer() {
+        _miniPlayerDismissedFor.value = _videoState.value.videoId
+    }
+
+    fun openLibraryRoute(route: LibraryRoute) {
+        _currentTab.value = AppTab.LIBRARY
+        _libraryRoute.value = route
+    }
+
+    /** Back inside the tabs: Library sub-screen -> Library root -> Home. Returns false at Home. */
+    fun navigateBackInTabs(): Boolean {
+        if (_currentTab.value == AppTab.LIBRARY && _libraryRoute.value != LibraryRoute.Root) {
+            _libraryRoute.value = LibraryRoute.Root
+            return true
+        }
+        if (_currentTab.value != AppTab.HOME) {
+            _currentTab.value = AppTab.HOME
+            return true
+        }
+        return false
+    }
+
+    fun openActionsSheet() {
+        if (_videoState.value.videoId.isNotBlank()) _showActionsSheet.value = true
+    }
+
+    fun dismissActionsSheet() {
+        _showActionsSheet.value = false
+    }
+
+
+    // ---------------------------------------------------------------------------------------
+    // For you (Home), stars, pull-down
+    // ---------------------------------------------------------------------------------------
+
+    /** Rebuilds the Home tab's "For you" list ([force]: even if it is recent). */
+    fun refreshForYou(force: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            forYou.refresh(prefsRepo.preferencesFlow.first().starredChannels, force)
+        }
+    }
+
+    /** Pull-down on Home: new uploads from subscriptions, then a new "For you" list. */
+    fun refreshHome() {
+        if (homeRefreshJob?.isActive == true) return
+        homeRefreshJob = viewModelScope.launch(Dispatchers.IO) {
+            _homeRefreshing.value = true
+            try {
+                if (library.allSubscriptions().isNotEmpty()) refreshFeedsNow()
+                forYou.refresh(prefsRepo.preferencesFlow.first().starredChannels, force = true)
+            } finally {
+                _homeRefreshing.value = false
+            }
+        }
+    }
+
+    fun forYouNotInterested(video: ForYouVideo) {
+        viewModelScope.launch(Dispatchers.IO) {
+            library.setFeedback(video.videoId, FeedbackType.NOT_INTERESTED, true)
+            forYou.remove(video.videoId)
+            showBanner("Got it: fewer videos like this")
+        }
+    }
+
+    fun toggleStar(channelId: String) {
+        if (channelId.isBlank()) return
+        val starred = channelId in preferences.value.starredChannels
+        viewModelScope.launch(Dispatchers.IO) {
+            prefsRepo.setStarred(channelId, !starred)
+            showBanner(if (starred) "Star removed" else "Starred: more of this channel in For you")
+        }
+    }
+
+    /** A pull-down in progress on a web page (from the page script). */
+    fun onWebPull(source: PullSource, mode: String, distance: Float) {
+        _webPull.value = WebPull(source, mode, distance)
+    }
+
+    /** The finger was lifted: refresh, minimize, or nothing (too short / cancelled). */
+    fun onWebPullEnd(source: PullSource, mode: String, distance: Float, velocity: Float, cancelled: Boolean) {
+        _webPull.value = null
+        if (cancelled) return
+        when (mode) {
+            "refresh" -> if (distance * PULL_DRAG_RATE >= PULL_REFRESH_THRESHOLD_DP && _webRefreshing.value == null) {
+                startWebRefresh(source)
+            }
+            "minimize" -> if (source == PullSource.PLAYER && _playerExpanded.value &&
+                (distance >= 140f || (velocity >= 0.8f && distance >= 48f))
+            ) {
+                collapsePlayer()
+            }
+        }
+    }
+
+    private fun startWebRefresh(source: PullSource) {
+        _webRefreshing.value = source
+        refreshSawLoading = false
+        _reloadRequests.tryEmit(source)
+        refreshTimeoutJob?.cancel()
+        refreshTimeoutJob = viewModelScope.launch {
+            delay(WEB_REFRESH_MAX_MS)
+            _webRefreshing.value = null
+        }
+    }
+
+    /** The refreshing page started (true) and then finished (false) loading. */
+    private fun onRefreshLoading(loading: Boolean) {
+        if (loading) {
+            refreshSawLoading = true
+        } else if (refreshSawLoading) {
+            refreshTimeoutJob?.cancel()
+            _webRefreshing.value = null
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Subscribe buttons on YouTube pages (local subscriptions)
+    // ---------------------------------------------------------------------------------------
+
+    /** Handles (/@name) looked up in the background this session. */
+    private val handleLookups: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Called on a page's JavaScript bridge thread: is this channel subscribed in the app? */
+    fun isChannelSubscribed(id: String, path: String): Boolean {
+        val key = path.lowercase()
+        val channelId = id.takeIf { CHANNEL_ID_PATTERN.matches(it) } ?: channelHandles[key]
+        if (channelId == null) {
+            // A handle the app has not seen: look it up once; the page's buttons update then.
+            if (key.startsWith("/@") && subscribedSnapshot.isNotEmpty() && handleLookups.add(key)) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    val resolved = try {
+                        NewPipeSupport.resolveChannelId("https://www.youtube.com$path")
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (resolved != null) {
+                        channelHandles[key] = resolved
+                        saveChannelHandles()
+                        if (resolved in subscribedSnapshot) _subscriptionsChanged.tryEmit(Unit)
+                    }
+                }
+            }
+            return false
+        }
+        return channelId in subscribedSnapshot
+    }
+
+    /** YouTube's Subscribe / Subscribed button was tapped on a page. */
+    fun onPageSubscribeTap(channel: PageChannel) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val key = channel.path.lowercase()
+            var id = channel.id.takeIf { CHANNEL_ID_PATTERN.matches(it) } ?: channelHandles[key]
+            if (id == null && channel.path.startsWith("/@")) {
+                id = try {
+                    NewPipeSupport.resolveChannelId("https://www.youtube.com" + channel.path)
+                } catch (e: Exception) {
+                    android.util.Log.w("StreamShield", "Channel lookup failed for ${channel.path}", e)
+                    null
+                }
+            }
+            if (id == null) {
+                showBanner("Could not identify this channel. Try Save → Subscribe on one of its videos.")
+                return@launch
+            }
+            if (channel.path.startsWith("/@") && channelHandles[key] != id) {
+                channelHandles[key] = id
+                saveChannelHandles()
+            }
+            val name = channel.name.trim()
+            if (library.isSubscribed(id)) {
+                val known = library.subscriptionName(id).orEmpty().ifBlank { name }
+                _unsubscribeRequest.value = UnsubscribeRequest(id, known.ifBlank { "this channel" })
+            } else if (library.subscribe(id, name)) {
+                // The channel's feed also brings its proper name (the page may not have shown it).
+                refresher.refreshOne(id, name)
+                val known = library.subscriptionName(id).orEmpty().ifBlank { name }
+                showBanner("Subscribed to ${known.ifBlank { "this channel" }}")
+            }
+        }
+    }
+
+    fun confirmPageUnsubscribe() {
+        val request = _unsubscribeRequest.value ?: return
+        _unsubscribeRequest.value = null
+        setSubscribed(request.channelId, request.name, subscribe = false)
+    }
+
+    fun dismissPageUnsubscribe() {
+        _unsubscribeRequest.value = null
+        _subscriptionsChanged.tryEmit(Unit)
+    }
+
+    private fun channelHandlesFile() = File(getApplication<Application>().filesDir, "channel_handles.json")
+
+    private fun loadChannelHandles() {
+        try {
+            val file = channelHandlesFile()
+            if (!file.exists()) return
+            val o = JSONObject(file.readText())
+            o.keys().forEach { k -> o.optString(k).takeIf { CHANNEL_ID_PATTERN.matches(it) }?.let { channelHandles[k] = it } }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun saveChannelHandles() {
+        try {
+            val o = JSONObject()
+            channelHandles.forEach { (k, v) -> o.put(k, v) }
+            channelHandlesFile().writeText(o.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Library actions for the current video
+    // ---------------------------------------------------------------------------------------
+
+    fun toggleSubscribeCurrent() {
+        val a = currentVideoActions.value
+        if (a.channelId.isBlank()) {
+            showBanner("Channel not known yet, try again in a moment")
+            return
+        }
+        setSubscribed(a.channelId, a.channelName, !a.subscribed)
+    }
+
+    fun setSubscribed(channelId: String, name: String, subscribe: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (subscribe) {
+                if (library.subscribe(channelId, name)) {
+                    showBanner("Subscribed to ${name.ifBlank { "channel" }}")
+                    refresher.refreshOne(channelId, name)
+                }
+            } else {
+                library.unsubscribe(channelId)
+                showBanner("Unsubscribed")
+            }
+        }
+    }
+
+    fun toggleLikeCurrent() = toggleBuiltIn(BuiltInPlaylist.LIKED, currentVideoActions.value.liked, "Liked", "Removed from liked")
+
+    fun toggleWatchLaterCurrent() =
+        toggleBuiltIn(BuiltInPlaylist.WATCH_LATER, currentVideoActions.value.inWatchLater, "Saved to Watch later", "Removed from Watch later")
+
+    private fun toggleBuiltIn(builtIn: BuiltInPlaylist, currentlyIn: Boolean, added: String, removed: String) {
+        val video = _videoState.value
+        if (video.videoId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            rememberCurrent(video)
+            val nowIn = library.toggleBuiltIn(builtIn, video.videoId, currentlyIn)
+            showBanner(if (nowIn) added else removed)
+        }
+    }
+
+    fun toggleCurrentInPlaylist(playlistId: Long) {
+        val video = _videoState.value
+        if (video.videoId.isBlank()) return
+        val inList = playlistId in currentVideoActions.value.playlistIds
+        viewModelScope.launch(Dispatchers.IO) {
+            rememberCurrent(video)
+            if (inList) library.removeFromPlaylist(playlistId, video.videoId) else library.addToPlaylist(playlistId, video.videoId)
+        }
+    }
+
+    fun createPlaylistWithCurrent(name: String) {
+        val video = _videoState.value
+        if (name.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val kind = if (video.isMusic) PlaylistKind.MUSIC else PlaylistKind.VIDEO
+            val id = library.createPlaylist(name, kind)
+            if (video.videoId.isNotBlank()) {
+                rememberCurrent(video)
+                library.addToPlaylist(id, video.videoId)
+            }
+            showBanner("Saved to $name")
+        }
+    }
+
+    fun toggleNotInterestedCurrent() {
+        val a = currentVideoActions.value
+        if (a.videoId.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            library.setFeedback(a.videoId, FeedbackType.NOT_INTERESTED, !a.notInterested)
+            showBanner(if (a.notInterested) "Feedback removed" else "Got it: fewer videos like this")
+        }
+    }
+
+    private suspend fun rememberCurrent(video: WebVideoState) {
+        library.rememberVideo(
+            video.videoId, video.title, video.channelId, video.channel, video.bestDurationSec, video.viewCount, video.isMusic
+        )
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Playlists (Library tab)
+    // ---------------------------------------------------------------------------------------
+
+    fun createPlaylist(name: String) {
+        if (name.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) { library.createPlaylist(name) }
+    }
+
+    fun renamePlaylist(id: Long, name: String) {
+        if (name.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) { library.renamePlaylist(id, name) }
+    }
+
+    fun deletePlaylist(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) { library.deletePlaylist(id) }
+        _libraryRoute.value = LibraryRoute.Root
+    }
+
+    fun removeFromPlaylist(playlistId: Long, videoId: String) {
+        viewModelScope.launch(Dispatchers.IO) { library.removeFromPlaylist(playlistId, videoId) }
+    }
+
+    fun movePlaylistItem(items: List<PlaylistVideo>, index: Int, delta: Int) {
+        viewModelScope.launch(Dispatchers.IO) { library.moveInPlaylist(items, index, delta) }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Subscriptions
+    // ---------------------------------------------------------------------------------------
+
+    fun refreshFeeds() {
+        if (_feedRefresh.value.running) return
+        viewModelScope.launch(Dispatchers.IO) { refreshFeedsNow() }
+    }
+
+    private suspend fun refreshFeedsNow() {
+        if (_feedRefresh.value.running) return
+        _feedRefresh.value = FeedRefreshState(running = true)
+        val result = try {
+            refresher.refreshAll()
+        } catch (e: Exception) {
+            null
+        }
+        _feedRefresh.value = FeedRefreshState(
+            running = false,
+            lastMessage = when {
+                result == null -> "Refresh failed"
+                result.failed > 0 -> "${result.failed} channel(s) could not be refreshed (will retry)"
+                else -> null
+            }
+        )
+    }
+
+    fun unsubscribe(channelId: String) = setSubscribed(channelId, "", subscribe = false)
+
+    /** Imports a Google Takeout subscriptions.csv chosen with the system file picker. */
+    fun importTakeoutSubscriptions(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = try {
+                getApplication<Application>().contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            } catch (_: Exception) {
+                null
+            }
+            val channels = text?.let { TakeoutSubscriptionsParser.parse(it) }.orEmpty()
+            if (channels.isEmpty()) {
+                showBanner("No channels found in that file")
+                return@launch
+            }
+            var added = 0
+            channels.forEach { if (library.subscribe(it.channelId, it.name)) added++ }
+            showBanner("Imported $added new subscription(s)")
+            refreshFeeds()
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Downloads
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Download button anywhere: uses the remembered quality for this kind (music / video) if
+     * there is one, otherwise opens the quality sheet (songs pre-select audio only).
+     */
+    fun requestDownload(target: DownloadTarget) {
+        if (target.videoId.isBlank()) return
+        val prefs = preferences.value
+        val remembered = if (target.isMusic) prefs.downloadMusicQuality else prefs.downloadVideoQuality
+        if (remembered >= 0) {
+            enqueueDownload(target, remembered)
+            return
+        }
+        _downloadSheet.value = DownloadSheetState(target)
+        viewModelScope.launch(Dispatchers.IO) {
+            val next = try {
+                val (options, meta) = DownloadCatalog.qualityOptions(target.videoId)
+                val known = target.copy(
+                    title = target.title.ifBlank { meta.title },
+                    channelName = target.channelName.ifBlank { meta.channelName },
+                    durationSec = if (target.durationSec > 0) target.durationSec else meta.durationSec
+                )
+                if (options.isEmpty()) {
+                    DownloadSheetState(known, loading = false, error = "This video has no downloadable formats.")
+                } else {
+                    DownloadSheetState(known, loading = false, options = options)
+                }
+            } catch (e: Exception) {
+                DownloadSheetState(target, loading = false, error = "Could not load download options. " + DownloadErrors.describe(e))
+            }
+            if (_downloadSheet.value?.target?.videoId == target.videoId) _downloadSheet.value = next
+        }
+    }
+
+    /** Download button in the player: the video or song that is open. */
+    fun downloadCurrent() {
+        val v = _videoState.value
+        if (v.videoId.isBlank()) return
+        requestDownload(DownloadTarget(v.videoId, v.title, v.channel, v.channelId, v.bestDurationSec, v.isMusic))
+    }
+
+    fun confirmDownload(option: QualityOption, remember: Boolean) {
+        val sheet = _downloadSheet.value ?: return
+        _downloadSheet.value = null
+        if (remember) viewModelScope.launch { prefsRepo.setDownloadQuality(sheet.target.isMusic, option.height) }
+        enqueueDownload(sheet.target, option.height)
+    }
+
+    fun dismissDownloadSheet() {
+        _downloadSheet.value = null
+    }
+
+    private fun enqueueDownload(target: DownloadTarget, height: Int) {
+        val audioOnly = height == 0
+        val id = OfflineItemEntity.idFor(target.videoId, audioOnly)
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val existing = offlineDao.getItem(id)
+            if (existing != null && !existing.isSmart && existing.isDone && OfflineStorage.exists(app, existing.location)) {
+                showBanner("Already downloaded")
+                return@launch
+            }
+            // A smart download of the same song becomes a regular download (saved to Music).
+            if (existing != null && existing.isSmart) OfflineDownloader.deleteFiles(app, existing)
+            offlineDao.upsertItem(
+                OfflineItemEntity(
+                    id = id,
+                    videoId = target.videoId,
+                    title = target.title,
+                    channelId = target.channelId,
+                    channelName = target.channelName,
+                    durationSec = target.durationSec,
+                    isMusic = target.isMusic,
+                    audioOnly = audioOnly,
+                    targetHeight = if (audioOnly) 0 else height,
+                    qualityLabel = "",
+                    origin = OfflineOrigin.MANUAL.name,
+                    status = OfflineStatus.QUEUED.name,
+                    totalBytes = 0L,
+                    downloadedBytes = 0L,
+                    location = "",
+                    mimeType = "",
+                    error = "",
+                    createdAt = System.currentTimeMillis(),
+                    completedAt = 0L,
+                    smartSection = "",
+                    smartRank = 0
                 )
             )
+            DownloadWorker.enqueue(app, id, restart = existing != null && existing.status == OfflineStatus.FAILED.name)
+            showBanner(if (audioOnly) "Downloading audio… (Library → Downloads)" else "Downloading ${height}p… (Library → Downloads)")
         }
+    }
+
+    fun retryDownload(item: OfflineItemEntity) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            offlineDao.updateStatus(item.id, OfflineStatus.QUEUED.name, "")
+            if (item.isSmart) SmartDownloads.refreshNow(app) else DownloadWorker.enqueue(app, item.id, restart = true)
+        }
+    }
+
+    /** Deletes a download. A removed smart download is not downloaded again for 60 days. */
+    fun deleteDownload(item: OfflineItemEntity) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!item.isSmart) DownloadWorker.cancel(app, item.id)
+            OfflineDownloader.deleteFiles(app, item)
+            offlineDao.deleteItem(item.id)
+            if (offlineDao.allItems().none { it.videoId == item.videoId }) OfflineStorage.deleteThumbnail(app, item.videoId)
+            if (item.isSmart) offlineDao.insertRemoved(SmartRemovedEntity(item.videoId, System.currentTimeMillis()))
+            showBanner("Download deleted")
+        }
+    }
+
+    /** Writes where the current video was left (before another player takes over). */
+    private fun flushProgress() {
+        val current = _videoState.value
+        if (!preferences.value.historyPaused && progressVideoId.isNotBlank() && current.videoId == progressVideoId) {
+            writeProgress(current, newSession = false)
+        }
+        progressVideoId = ""
+    }
+
+    /** Plays a downloaded item, with the other finished items of the same list as the queue. */
+    fun playDownload(item: OfflineItemEntity) {
+        if (!item.isDone) return
+        flushProgress()
+        val list = offlineItems.value.filter { it.isDone && it.isSmart == item.isSmart }
+        val index = list.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
+        _showSettings.value = false
+        _playerExpanded.value = false
+        _miniPlayerDismissedFor.value = ""
+        _playbackSource.value = PlaybackSource.OFFLINE
+        _offlineExpanded.value = true
+        _videoState.value = WebVideoState()
+        _offlinePlayRequests.tryEmit(OfflinePlayRequest(list, index))
+    }
+
+    fun onOfflineState(state: WebVideoState) {
+        if (_playbackSource.value == PlaybackSource.OFFLINE) applyVideoState(state)
+    }
+
+    fun expandOffline() {
+        if (_playbackSource.value == PlaybackSource.OFFLINE) _offlineExpanded.value = true
+    }
+
+    fun collapseOffline() {
+        _offlineExpanded.value = false
+    }
+
+    /** Opening anything on YouTube hands the media controls back to the web player. */
+    private fun switchToWebPlayback() {
+        if (_playbackSource.value != PlaybackSource.OFFLINE) return
+        flushProgress()
+        _playbackSource.value = PlaybackSource.WEB
+        _offlineExpanded.value = false
+        _videoState.value = WebVideoState()
+    }
+
+    fun setSmartSize(mb: Int) {
+        viewModelScope.launch {
+            prefsRepo.setSmartSize(mb)
+            SmartDownloads.onSizeChanged(getApplication(), mb)
+            showBanner(if (mb <= 0) "Smart downloads off" else "Smart downloads: next refresh on Wi-Fi while charging")
+        }
+    }
+
+    fun refreshSmartNow() {
+        SmartDownloads.refreshNow(getApplication())
+        showBanner("Refreshing smart downloads (on Wi-Fi)")
+    }
+
+    fun resetDownloadQuality(music: Boolean) {
+        viewModelScope.launch { prefsRepo.setDownloadQuality(music, -1) }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Backup & restore (no account: a JSON file the user keeps, plus optional daily auto-backup)
+    // ---------------------------------------------------------------------------------------
+
+    fun exportBackup(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ok = try {
+                val json = backup.export()
+                getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.use { it.write(json.toByteArray()) } != null
+            } catch (_: Exception) {
+                false
+            }
+            showBanner(if (ok) "Backup saved" else "Could not save the backup")
+        }
+    }
+
+    fun prepareImport(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = readText(uri)
+            if (text == null) {
+                showBanner("Could not read that file")
+                return@launch
+            }
+            try {
+                _pendingImport.value = PendingImport(text, backup.summarize(text))
+            } catch (e: IllegalArgumentException) {
+                showBanner(e.message ?: "Not a backup file")
+            }
+        }
+    }
+
+    fun confirmImport(mode: ImportMode) {
+        val pending = _pendingImport.value ?: return
+        _pendingImport.value = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                backup.import(pending.text, mode)
+                showBanner(if (mode == ImportMode.MERGE) "Backup merged" else "Backup restored")
+                refreshFeeds()
+            } catch (e: Exception) {
+                showBanner("Import failed: ${e.message ?: "unknown error"}")
+            }
+        }
+    }
+
+    fun cancelImport() {
+        _pendingImport.value = null
+    }
+
+    /** Folder picked for automatic backups: keep access across restarts and back up right away. */
+    fun setAutoBackupFolder(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                getApplication<Application>().contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+            prefsRepo.setAutoBackup(true, uri.toString())
+            AutoBackupWorker.schedule(getApplication(), true)
+            backupNow()
+        }
+    }
+
+    fun toggleAutoBackup(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            prefsRepo.setAutoBackup(enabled, null)
+            AutoBackupWorker.schedule(getApplication(), enabled && preferences.value.autoBackupFolder.isNotBlank())
+        }
+    }
+
+    fun backupNow() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val folder = prefsRepo.preferencesFlow.first().autoBackupFolder
+            if (folder.isBlank()) {
+                showBanner("Choose a backup folder first")
+                return@launch
+            }
+            val ok = BackupFolder.writeAutoBackup(getApplication(), folder, backup.export())
+            if (ok) prefsRepo.setLastAutoBackup(System.currentTimeMillis())
+            showBanner(if (ok) "Backed up to ${BackupFolder.displayName(folder)}" else "Backup failed (folder no longer accessible?)")
+        }
+    }
+
+    fun importTakeoutHistory(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = readText(uri) ?: return@launch showBanner("Could not read that file")
+            try {
+                val count = backup.importTakeoutHistory(text)
+                showBanner("Imported $count videos from your YouTube history")
+            } catch (e: IllegalArgumentException) {
+                showBanner(e.message ?: "Not a watch-history.json file")
+            }
+        }
+    }
+
+    private fun readText(uri: Uri): String? = try {
+        getApplication<Application>().contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+    } catch (_: Exception) {
+        null
     }
 
     override fun onCleared() {
