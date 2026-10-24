@@ -201,8 +201,15 @@
                 if (!value || typeof value !== 'object') continue;
                 if (key === 'nextVideo' && !found.playlist) found.playlist = endpointOf(value);
                 else if (key === 'autoplayVideo' && !found.autoplay) found.autoplay = endpointOf(value);
-                else if (key === 'playlistPanelRenderer' && !found.panel && Array.isArray(value.contents)) {
-                    var idx = typeof value.currentIndex === 'number' ? value.currentIndex : -1;
+                // Desktop: playlistPanelRenderer. m.youtube.com: singleColumnWatchNextResults.playlist.playlist.
+                else if ((key === 'playlistPanelRenderer' || key === 'playlist') && !found.panel && Array.isArray(value.contents)) {
+                    // contents can be a window of a long playlist, so find the current video in it
+                    // (currentIndex is the position in the whole playlist, not in contents).
+                    var idx = -1;
+                    for (var j = 0; j < value.contents.length; j++) {
+                        var at = endpointOf(value.contents[j] && value.contents[j].playlistPanelVideoRenderer);
+                        if (at && at.videoId === current.videoId) { idx = j; break; }
+                    }
                     var item = idx >= 0 && value.contents[idx + 1];
                     found.panel = item && endpointOf(item.playlistPanelVideoRenderer);
                 }
@@ -605,8 +612,10 @@
     }
 
     // While the app is hidden (PiP, screen off, another app), YouTube's own "Up next" countdown
-    // does not run: it is driven by on-screen animation/timers. Advance ourselves: first via the
-    // player's API (keeps the single-page app), then by opening the next video's URL.
+    // does not run: it is driven by on-screen animation/timers. Advance ourselves: open the video
+    // the watch-next response names (what YouTube's countdown would play). The player API is only
+    // a fallback: on m.youtube.com the player does not know the playlist (getPlaylist() is empty),
+    // so nextVideo() leaves a mix or playlist for an unrelated suggestion.
     var advanceTimers = [];
     var ADVANCE_FLAG = 'streamshield.autoAdvanceAt';
 
@@ -626,18 +635,15 @@
         advanceTimers.push(setTimeout(function () {
             if (!stillStuck()) return;
             markAutoAdvance();
+            var next = nextByVideo[id];
+            if (next) {
+                location.assign(nextVideoUrl(next));
+                return;
+            }
             var player = hookedPlayer || findPlayer();
             if (player && typeof player.nextVideo === 'function') {
                 try { player.nextVideo(); } catch (e) {}
             }
-            advanceTimers.push(setTimeout(function () {
-                if (!stillStuck()) return;
-                var next = nextByVideo[id];
-                if (next) {
-                    markAutoAdvance();
-                    location.assign(nextVideoUrl(next));
-                }
-            }, 2500));
         }, 1500));
     }
 

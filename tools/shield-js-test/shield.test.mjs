@@ -146,13 +146,27 @@ async function openWatchPage(config = {}, path = '/watch?v=abc123def45') {
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(PLAYER_RESPONSE_WITH_ADS) });
         }
         if (url.pathname === '/youtubei/v1/next') {
-            const inPlaylist = url.searchParams.get('kind') !== 'suggestion';
+            const kind = url.searchParams.get('kind');
             const next = { watchEndpoint: { videoId: 'nextVid0001', playlistId: 'RDabc', index: 3 } };
-            const sets = inPlaylist ? [{ nextVideo: next, autoplayVideo: next }] : [{ autoplayVideo: { watchEndpoint: { videoId: 'suggVid0001' } } }];
+            let results;
+            if (kind === 'mweb-mix') {
+                // m.youtube.com shape (seen on the live site): the queue is in playlist.playlist,
+                // and the autoplay sets carry only autoplayVideo (no nextVideo).
+                const item = (videoId, index) => ({ playlistPanelVideoRenderer: { videoId,
+                    navigationEndpoint: { watchEndpoint: { videoId, playlistId: 'RDabc', index } } } });
+                results = {
+                    playlist: { playlist: { playlistId: 'RDabc', currentIndex: 2, localCurrentIndex: 1, isInfinite: true,
+                        contents: [item('prevVid0001', 1), item('abc123def45', 2), item('nextVid0001', 3)] } },
+                    autoplay: { autoplay: { sets: [{ autoplayVideo: next }] } }
+                };
+            } else {
+                const sets = kind !== 'suggestion' ? [{ nextVideo: next, autoplayVideo: next }] : [{ autoplayVideo: { watchEndpoint: { videoId: 'suggVid0001' } } }];
+                results = { autoplay: { autoplay: { sets } } };
+            }
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
                 responseContext: {},
                 currentVideoEndpoint: { watchEndpoint: { videoId: 'abc123def45' } },
-                contents: { singleColumnWatchNextResults: { autoplay: { autoplay: { sets } } } }
+                contents: { singleColumnWatchNextResults: results }
             }) });
         }
         if (url.pathname === '/youtubei/v1/browse') {
@@ -436,14 +450,18 @@ console.log('Picture-in-picture layout');
 // ---------------------------------------------------------------------------------------------
 console.log('Auto-advance while hidden');
 {
+    // kind: which watch-next response the page sees ('none' = no response, e.g. it was missed).
+    // The stub nextVideo() acts like the real m.youtube.com player, which does not know the
+    // playlist and opens an unrelated suggestion.
     async function endVideo(page, kind) {
         await page.evaluate(async (k) => {
             window.__nextVideoCalls = 0;
             document.getElementById('movie_player').nextVideo = () => {
                 window.__nextVideoCalls++;
                 sessionStorage.setItem('test.nextVideoCalls', String(window.__nextVideoCalls));
+                location.assign('/watch?v=unrelated01');
             };
-            await (await fetch('/youtubei/v1/next?kind=' + k, { method: 'POST' })).json();
+            if (k !== 'none') await (await fetch('/youtubei/v1/next?kind=' + k, { method: 'POST' })).json();
             const v = document.querySelector('video');
             v.currentTime = v.duration - 0.3;
             await v.play();
@@ -453,14 +471,31 @@ console.log('Auto-advance while hidden');
     // In PiP, a mix: YouTube's countdown does not run, so the app advances.
     let { context, page } = await openWatchPage({ pip: true });
     await endVideo(page, 'playlist');
-    await page.waitForURL(/nextVid0001/, { timeout: 8000 }).catch(() => {});
-    const advanced = page.url();
-    check('PiP: first tries the player API (nextVideo)',
-        (await page.evaluate(() => sessionStorage.getItem('test.nextVideoCalls'))) === '1');
+    await page.waitForURL(/watch\?v=(?!abc123def45)/, { timeout: 8000 }).catch(() => {});
+    let advanced = page.url();
     check('PiP: opens the next video of the mix with its playlist position',
         /watch\?v=nextVid0001&list=RDabc&index=4/.test(advanced), advanced);
+    check('PiP: does not use the player API when the next video is known',
+        (await page.evaluate(() => sessionStorage.getItem('test.nextVideoCalls'))) === null);
     await page.waitForFunction(() => { const v = document.querySelector('video'); return v && !v.paused; }, null, { timeout: 5000 }).catch(() => {});
     check('the next video starts playing on its own', await page.evaluate(() => !document.querySelector('video').paused));
+    await context.close();
+
+    // m.youtube.com mix (live-site response shape): stays in the mix.
+    ({ context, page } = await openWatchPage({ pip: true, autoAdvance: false }));
+    await endVideo(page, 'mweb-mix');
+    await page.waitForURL(/watch\?v=(?!abc123def45)/, { timeout: 8000 }).catch(() => {});
+    advanced = page.url();
+    check('m.youtube.com mix: next video of the mix, even with autoplay off',
+        /watch\?v=nextVid0001&list=RDabc&index=4/.test(advanced), advanced);
+    await context.close();
+
+    // No watch-next response captured: fall back to the player API.
+    ({ context, page } = await openWatchPage({ pip: true }));
+    await endVideo(page, 'none');
+    await page.waitForURL(/unrelated01/, { timeout: 8000 }).catch(() => {});
+    check('no next video known: falls back to the player API (nextVideo)',
+        page.url().includes('unrelated01'), page.url());
     await context.close();
 
     // App in the background (screen off), suggestion autoplay on.
