@@ -41,7 +41,14 @@ data class WebVideoState(
     /** Taps on the page's play/pause button that the page missed and the app applied. */
     val tapFixes: Int = 0,
     /** What was on top at the tapped point the last time (diagnostics). */
-    val tapFixTop: String = ""
+    val tapFixTop: String = "",
+    /**
+     * The last time the page moved on to the next video while the app was hidden, and how:
+     * "page" (opened the next video's page), "queue" (YouTube Music's next track), "player" (the
+     * page's next track), "none" (nothing to play next). Empty if it has not happened.
+     */
+    val autoAdvance: String = "",
+    val autoAdvanceAt: Long = 0L
 ) {
     /** Best known duration: the player response's length, else the media element's. */
     val bestDurationSec: Int get() = if (lengthSec > 0) lengthSec else durationSec

@@ -15,7 +15,8 @@
  *      m.youtube's bottom bar (the app has its own tabs); the YouTube logo opens the app's Home.
  *   4. Background play: keep the page "visible" so YouTube does not pause when the app is hidden.
  *   5. Playback speed, SponsorBlock segment skipping, PiP layout, play/pause/next/previous
- *      commands (through the page's own Media Session handlers when it has them) and autoplay.
+ *      commands (through the page's own Media Session handlers when it has them) and autoplay,
+ *      also while the app is hidden (the next video is taken from the watch-next responses).
  *   6. Report compact playback state to the app (only when it changes), including the video's
  *      channel, length and position from the player response.
  *   7. Taps on the page's play/pause control that the page missed are applied by the app.
@@ -272,6 +273,11 @@
             return;
         }
         try { noteChannel(obj); } catch (e) {}
+        try {
+            captureNextVideo(obj);
+            if (obj.response) captureNextVideo(obj.response);
+            if (obj.watchNextResponse) captureNextVideo(obj.watchNextResponse);
+        } catch (e) {}
         var pr = obj.videoDetails ? obj : (obj.playerResponse && obj.playerResponse.videoDetails ? obj.playerResponse : null);
         var vd = pr && pr.videoDetails;
         if (!vd || !vd.videoId) return;
@@ -287,9 +293,101 @@
         };
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Next video, for autoplay while the app is hidden (section 4). Watch-next responses say what
+    // plays next: autoplay.autoplay.sets[0].nextVideo (playlists, mixes) or .autoplayVideo
+    // (suggestions), and the queue: playlistPanelRenderer (YouTube Music) or, on m.youtube.com,
+    // singleColumnWatchNextResults.playlist.playlist. Keyed by the video the response is for.
+    // Same approach as the original StreamShield (its commits 84418cd and d4e373e).
+    // ---------------------------------------------------------------------------------------
+    var nextByVideo = {};
+    var nextByVideoKeys = [];
+
+    function endpointOf(node) {
+        var we = node && (node.watchEndpoint || (node.navigationEndpoint && node.navigationEndpoint.watchEndpoint));
+        return we && typeof we.videoId === 'string' ? we : null;
+    }
+
+    // A queue entry is {playlistPanelVideoRenderer} or, on YouTube Music, a song/video pair:
+    // {playlistPanelVideoWrapperRenderer: {primaryRenderer: {playlistPanelVideoRenderer}}}.
+    function queueItem(entry) {
+        if (!entry || typeof entry !== 'object') return null;
+        if (entry.playlistPanelVideoRenderer) return entry.playlistPanelVideoRenderer;
+        var w = entry.playlistPanelVideoWrapperRenderer;
+        return (w && w.primaryRenderer && w.primaryRenderer.playlistPanelVideoRenderer) || null;
+    }
+
+    function queueItemId(item) {
+        var e = endpointOf(item);
+        return e ? e.videoId : (item && typeof item.videoId === 'string' ? item.videoId : '');
+    }
+
+    function captureNextVideo(obj) {
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+        var current = endpointOf(obj.currentVideoEndpoint);
+        // YouTube Music's watch-next response is recognised by its renderer when it does not name
+        // the current video; the queue entry marked "selected" is the current song then.
+        var musicNext = !!(obj.contents && obj.contents.singleColumnMusicWatchNextResultsRenderer);
+        if (!current && !musicNext) return;   // only watch-next responses
+        var found = { playlist: null, autoplay: null };
+        var queues = [];
+        (function walk(node, depth) {
+            if (!node || typeof node !== 'object' || depth > MAX_WALK_DEPTH) return;
+            if (Array.isArray(node)) {
+                for (var i = 0; i < node.length; i++) walk(node[i], depth + 1);
+                return;
+            }
+            for (var key in node) {
+                if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+                var value = node[key];
+                if (!value || typeof value !== 'object') continue;
+                if (key === 'nextVideo' && !found.playlist) found.playlist = endpointOf(value);
+                else if (key === 'autoplayVideo' && !found.autoplay) found.autoplay = endpointOf(value);
+                else if ((key === 'playlistPanelRenderer' || key === 'playlist') && Array.isArray(value.contents) &&
+                    queues.length < 4) {
+                    queues.push(value.contents);
+                }
+                walk(value, depth + 1);
+            }
+        })(obj, 0);
+
+        var currentId = current ? current.videoId : '';
+        var q, i;
+        for (q = 0; q < queues.length && !currentId; q++) {
+            for (i = 0; i < queues[q].length; i++) {
+                var sel = queueItem(queues[q][i]);
+                if (sel && sel.selected === true) { currentId = queueItemId(sel); break; }
+            }
+        }
+        if (!currentId) return;
+        // The current video's entry, found by id: contents can be a window of a long playlist, and
+        // currentIndex is the position in the whole playlist, not in contents.
+        var panel = null;
+        for (q = 0; q < queues.length && !panel; q++) {
+            for (i = 0; i < queues[q].length; i++) {
+                if (queueItemId(queueItem(queues[q][i])) !== currentId) continue;
+                panel = endpointOf(queueItem(queues[q][i + 1]));
+                break;
+            }
+        }
+        var next = found.playlist || panel || found.autoplay;
+        if (!next || next.videoId === currentId) return;
+        if (!nextByVideo[currentId]) {
+            nextByVideoKeys.push(currentId);
+            if (nextByVideoKeys.length > 50) delete nextByVideo[nextByVideoKeys.shift()];
+        }
+        // YouTube Music always plays on through its queue (a radio when it runs out), so a song
+        // counts as part of a playlist there.
+        nextByVideo[currentId] = { endpoint: next, inPlaylist: !!(found.playlist || panel || musicNext) };
+    }
+
     // Expose pure helpers for tests.
-    var internals = { pruneResponse: pruneResponse, isAdItem: isAdItem, noteDetails: noteDetails };
+    var internals = { pruneResponse: pruneResponse, isAdItem: isAdItem, noteDetails: noteDetails, nextByVideo: nextByVideo };
     internals.setAutoplayDelay = function (ms) { AUTOPLAY_DELAY_MS = ms; };
+    internals.setAdvanceDelays = function (first, musicFallback) {
+        ADVANCE_DELAY_MS = first;
+        MUSIC_PAGE_FALLBACK_MS = musicFallback;
+    };
     internals.diag = function () { return diag; };
 
     (function installJsonHooks() {
@@ -880,6 +978,7 @@
 
     window.addEventListener('pointerdown', function (e) {
         lastPointerAt = Date.now();
+        lastPointerTarget = e.target;
         pendingPlayTap = null;
         if (isBrowsePage() || e.isPrimary === false) return;
         var control = playPauseControlAt(e.clientX, e.clientY);
@@ -902,6 +1001,73 @@
             reportState(true);
         }, PLAY_TAP_CHECK_MS);
     }, true);
+
+    // ---- sound: undo YouTube's muted autoplay ---------------------------------------------
+    // YouTube starts a video muted ("Tap to unmute") when its page was opened without a tap on
+    // it: the app's own page loads (the first video after opening the app, links opened in the
+    // app) and autoplay while the screen is off. The WebView allows sound without a tap, so the
+    // video is unmuted when it plays, through the player's API so YouTube's own state follows.
+    // A mute the user chose on the page (a tap on a mute/volume control) is kept, also for later
+    // videos in this tab, until they unmute. Ads keep the fallback's muting (section 4).
+    var lastPointerTarget = null;
+    var userMuted = false;
+    var USER_MUTED_FLAG = 'streamshield.userMuted';
+    var MAX_UNMUTES_PER_VIDEO = 5;
+    var unmutes = { id: '', count: 0 };
+    var unmuting = false;
+    try { userMuted = sessionStorage.getItem(USER_MUTED_FLAG) === '1'; } catch (e) {}
+
+    function isMuteControl(el) {
+        for (var n = el, depth = 0; n && n.nodeType === 1 && depth < 6; n = n.parentElement, depth++) {
+            var cls = typeof n.className === 'string' ? n.className : '';
+            var label = (n.getAttribute('aria-label') || n.getAttribute('title') || '') + ' ' + cls;
+            if (/mute|volume/i.test(label)) return true;
+        }
+        return false;
+    }
+
+    function setUserMuted(muted) {
+        userMuted = muted;
+        try {
+            if (muted) sessionStorage.setItem(USER_MUTED_FLAG, '1');
+            else sessionStorage.removeItem(USER_MUTED_FLAG);
+        } catch (e) {}
+    }
+
+    function ensureSound(video) {
+        if (!video || adActive || userMuted || isBrowsePage()) return;
+        var player = hookedPlayer || findPlayer();
+        var playerMuted = false;
+        try { playerMuted = !!(player && typeof player.isMuted === 'function' && player.isMuted()); } catch (e) {}
+        if (!video.muted && video.volume > 0 && !playerMuted) return;
+        // At most a few times per video, so the app never fights the page in a loop.
+        var id = playingVideoId();
+        if (unmutes.id !== id) unmutes = { id: id, count: 0 };
+        if (unmutes.count >= MAX_UNMUTES_PER_VIDEO) return;
+        unmutes.count++;
+        unmuting = true;
+        try {
+            if (player && typeof player.unMute === 'function') player.unMute();
+            if (video.volume === 0) {
+                if (player && typeof player.setVolume === 'function') player.setVolume(100);
+                video.volume = 1;
+            }
+            video.muted = false;
+        } catch (e) {
+        } finally {
+            unmuting = false;
+        }
+    }
+
+    function onVolumeChange(video) {
+        if (adActive || unmuting) return;
+        var muted = video.muted || video.volume === 0;
+        if (Date.now() - lastPointerAt < 1500 && isMuteControl(lastPointerTarget)) {
+            setUserMuted(muted);   // the user's own choice on the page
+            return;
+        }
+        if (muted && !video.paused) ensureSound(video);
+    }
 
     var sponsor = { videoId: '', segments: [] };
     var lastStateJson = '';
@@ -987,6 +1153,8 @@
             if (v) {
                 v.muted = savedMuted;
                 setRate(v, config.speed);
+                // Muted before the ad by YouTube's muted autoplay (not by the user): sound on.
+                if (!v.paused) ensureSound(v);
             }
         }
     }
@@ -1062,7 +1230,10 @@
             // The page's copy of the app's PiP flag (the app re-sends its config if they differ).
             cfgPip: !!config.pip,
             tapFix: tapFix.count,
-            tapTop: tapFix.top
+            tapTop: tapFix.top,
+            // Last time autoplay moved on while the app was hidden, and how.
+            adv: lastAdvance.how,
+            advAt: lastAdvance.at
         };
         var json = JSON.stringify(state);
         if (!force && json === lastStateJson) return;
@@ -1082,18 +1253,24 @@
             }
             applySpeed();
             onAdStateChanged();
+            cancelAutoAdvance();
+            resumeAfterAdvance(video);
             reportState();
         });
         video.addEventListener('durationchange', function () { if (adActive) fastForwardAd(); });
         video.addEventListener('playing', function () {
             userPaused = false;
+            cancelAutoAdvance();
+            if (lastAdvanceAt && !adActive) clearAdvanceFlag();
             var id = currentVideoId();
             if (id && diag.videoId === id && diag.startMs < 0 && !adActive) {
                 diag.startMs = Date.now() - diag.navAt;
             }
             applySpeed();
+            ensureSound(video);
             reportState();
         });
+        video.addEventListener('volumechange', function () { onVolumeChange(video); });
         video.addEventListener('pause', function () {
             // Paused right after a tap in the page (its own controls): the user's choice, so the
             // app does not start it again (e.g. after closing an app-upsell dialog).
@@ -1107,7 +1284,8 @@
         });
         video.addEventListener('ended', function () {
             reportState();
-            scheduleAutoplay();
+            if (hiddenForAutoplay()) scheduleAutoAdvance(video);
+            else scheduleAutoplay();
         });
         video.addEventListener('ratechange', function () {
             if (settingRate || adActive || Math.abs(video.playbackRate - config.speed) < 0.01) return;
@@ -1126,6 +1304,8 @@
             else checkSponsorSegments(video);
         });
         applySpeed();
+        // A page opened by autoplay may have loaded the video before this hook was attached.
+        resumeAfterAdvance(video);
         reportState();
     }
 
@@ -1194,6 +1374,127 @@
     }
     var AUTOPLAY_DELAY_MS = 4000;
 
+    // ---- autoplay while the app is hidden ----------------------------------------------------
+    // With the screen off or the app in the background nothing is drawn, so YouTube's "Up next"
+    // countdown (driven by on-screen animation) never finishes; in picture-in-picture it is hidden.
+    // The original StreamShield found this and verified the remedy with the screen off: when a
+    // video ends there, move on without the page's countdown.
+    //  - m.youtube.com: open the video the watch-next response names (keeps the mix or playlist
+    //    and the position in it). next() is only a fallback: this player does not know the
+    //    playlist, and its nextVideo() leaves a mix for an unrelated suggestion.
+    //  - YouTube Music: its own "next track" first (keeps the queue as the user arranged it); if
+    //    the song has still not changed, open the next song's page.
+    // The video opened this way is started even though nobody tapped it (resumeAfterAdvance).
+    var ADVANCE_DELAY_MS = 1500;
+    var MUSIC_PAGE_FALLBACK_MS = 4000;
+    var ADVANCE_RESUME_MS = 30000;
+    var ADVANCE_FLAG = 'streamshield.autoAdvanceAt';
+    var ADVANCE_LOG = 'streamshield.lastAdvance';
+    var advanceTimers = [];
+    var lastAdvanceAt = 0;                    // set while a video opened by autoplay should start
+    var lastAdvance = { how: '', at: 0 };     // for Settings > Diagnostics
+    try {
+        lastAdvanceAt = Number(sessionStorage.getItem(ADVANCE_FLAG)) || 0;
+        var savedAdvance = JSON.parse(sessionStorage.getItem(ADVANCE_LOG) || 'null');
+        if (savedAdvance && typeof savedAdvance.how === 'string') lastAdvance = savedAdvance;
+    } catch (e) {}
+
+    function hiddenForAutoplay() {
+        return !!config.pip || config.appVisible === false;
+    }
+
+    function isMusicSite() {
+        return location.hostname === 'music.youtube.com';
+    }
+
+    // On YouTube Music the address often has no video id (the song plays under another page).
+    function playingVideoId() {
+        return currentVideoId() || (isMusicSite() && details ? details.videoId : '');
+    }
+
+    function nextVideoUrl(info) {
+        var e = info.endpoint;
+        var url = location.origin + '/watch?v=' + encodeURIComponent(e.videoId);
+        if (e.playlistId) url += '&list=' + encodeURIComponent(e.playlistId);
+        // m.youtube.com's index parameter counts from 1, the endpoint's from 0.
+        if (typeof e.index === 'number' && !isMusicSite()) url += '&index=' + (e.index + 1);
+        return url;
+    }
+
+    function cancelAutoAdvance() {
+        advanceTimers.forEach(clearTimeout);
+        advanceTimers = [];
+    }
+
+    function noteAdvance(how) {
+        lastAdvance = { how: how, at: Date.now() };
+        if (how !== 'none') lastAdvanceAt = lastAdvance.at;
+        try {
+            if (how !== 'none') sessionStorage.setItem(ADVANCE_FLAG, String(lastAdvanceAt));
+            sessionStorage.setItem(ADVANCE_LOG, JSON.stringify(lastAdvance));
+        } catch (e) {}
+        reportState(true);
+    }
+
+    function clearAdvanceFlag() {
+        lastAdvanceAt = 0;
+        try { sessionStorage.removeItem(ADVANCE_FLAG); } catch (e) {}
+    }
+
+    function scheduleAutoAdvance(video) {
+        cancelAutoAdvance();
+        if (adActive || userPaused) return;
+        var id = playingVideoId();
+        var music = isMusicSite();
+        var info = nextByVideo[id];
+        // Mixes, playlists and YouTube Music's queue always continue (as on YouTube); a suggested
+        // video only with the app's Autoplay setting on.
+        if (!config.autoplay && !music && !(info && info.inPlaylist)) return;
+        function stillStuck() {
+            return playingVideoId() === id && video.ended && !userPaused && !adActive;
+        }
+        advanceTimers.push(setTimeout(function () {
+            if (!stillStuck()) return;
+            if (!hiddenForAutoplay()) { scheduleAutoplay(); return; }   // back on screen meanwhile
+            if (music) {
+                noteAdvance('queue');
+                next();
+                advanceTimers.push(setTimeout(function () {
+                    if (!stillStuck() || !hiddenForAutoplay()) return;
+                    var later = nextByVideo[id];
+                    if (later) {
+                        noteAdvance('page');
+                        location.assign(nextVideoUrl(later));
+                    } else {
+                        noteAdvance('none');
+                    }
+                }, MUSIC_PAGE_FALLBACK_MS));
+                return;
+            }
+            var known = nextByVideo[id];
+            if (known) {
+                if (!config.autoplay && !known.inPlaylist) return;
+                noteAdvance('page');
+                location.assign(nextVideoUrl(known));
+                return;
+            }
+            noteAdvance(next() ? 'player' : 'none');
+        }, ADVANCE_DELAY_MS));
+    }
+
+    // After autoplay moved on (possibly to a freshly loaded page), start the new video even
+    // though nobody tapped it. Called when a video loads, when it is hooked and on each tick.
+    function resumeAfterAdvance(video) {
+        if (!lastAdvanceAt) return;
+        if (Date.now() - lastAdvanceAt > ADVANCE_RESUME_MS || userPaused) { clearAdvanceFlag(); return; }
+        if (!video || video.ended || adActive || video.readyState < 1) return;
+        if (!video.paused) { clearAdvanceFlag(); return; }
+        if (!(hiddenForAutoplay() || config.bgPlay)) return;
+        setTimeout(function () {
+            if (lastAdvanceAt && video.paused && !video.ended && !userPaused && !adActive) resumeVideo(video);
+        }, 400);
+    }
+
     function hookPlayer() {
         var player = findPlayer();
         if (player && player !== hookedPlayer) {
@@ -1255,6 +1556,7 @@
         trackNavigation();
         hookPlayer();
         applyPendingSeek();
+        if (lastAdvanceAt) resumeAfterAdvance(hookedVideo);
         reportState();
     }
 
@@ -1687,6 +1989,8 @@
         },
         pause: function () {
             userPaused = true;
+            cancelAutoAdvance();
+            clearAdvanceFlag();
             var v = findVideo();
             if (v) pauseVideo(v);
         },
@@ -1698,6 +2002,8 @@
                 resumeVideo(v);
             } else {
                 userPaused = true;
+                cancelAutoAdvance();
+                clearAdvanceFlag();
                 pauseVideo(v);
             }
         },

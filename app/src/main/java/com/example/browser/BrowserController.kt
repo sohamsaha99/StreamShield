@@ -632,7 +632,9 @@ class BrowserController(
                     ended = o.optBoolean("ended"),
                     timersBoosted = o.optInt("boosted"),
                     tapFixes = o.optInt("tapFix"),
-                    tapFixTop = o.optString("tapTop")
+                    tapFixTop = o.optString("tapTop"),
+                    autoAdvance = o.optString("adv"),
+                    autoAdvanceAt = o.optLong("advAt")
                 )
             } catch (_: Exception) {
                 null

@@ -96,6 +96,19 @@ installs on a phone over USB.
   use `startService`. Stopping goes through `ACTION_SHUTDOWN` so a just-started service can still
   call `startForeground` (Android 9–11 crash otherwise). Download workers fall back to normal
   background work when a foreground notification is not allowed.
+- **Autoplay while hidden.** With the screen off nothing is drawn, so YouTube's "Up next"
+  countdown never finishes (in PiP it is hidden). `shield.js` moves on itself when a video ends
+  while the app is hidden: on m.youtube.com it opens the next video named by the watch-next
+  response (keeps mix/playlist position; `nextVideo()` would leave the mix), on YouTube Music it
+  calls the page's next track and opens the next song's page only if that did not work. The
+  ViewModel keeps the notification service "playing" (foreground + wake lock) for up to 30 s
+  between the two videos; reporting "paused" there let Android suspend the app and stopped the
+  service from returning to the foreground. Settings → Diagnostics shows how the last autoplay
+  went and how long the gap was.
+- **Muted autoplay.** YouTube starts a video muted when its page was opened without a tap (the
+  app's own loads, background autoplay). `shield.js` unmutes on `playing`/`volumechange` through
+  `player.unMute()`, except during ads and after the user muted with a mute/volume control on
+  the page (remembered per tab in sessionStorage); at most 5 times per video.
 - **PiP playback.** YouTube's player pauses the video when the window turns into PiP. Resuming
   with `video.play()` behind the player's back makes it pause again (audible stutter). Instead,
   `shield.js` refuses page `pause()` calls in PiP unless the user asked (`userPaused`), and resumes
@@ -129,6 +142,8 @@ installs on a phone over USB.
    - a pre-roll ad does not appear and the video starts immediately; feed and Shorts ads are
      hidden;
    - the on-video play/pause, the mini-player and the lock-screen controls all pause and play;
+   - with the screen off, the next video of a mix and the next song in the Music tab start on
+     their own (seek near the end, lock the phone, wait);
    - fullscreen enters and exits; PiP enters on Home, the player is not cropped after expanding,
      and closing the PiP window pauses;
    - a video opens with the slide and placeholder, Back and pull-down minimize it;

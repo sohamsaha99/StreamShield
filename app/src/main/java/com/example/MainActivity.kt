@@ -478,6 +478,7 @@ fun StreamShieldApp(
     val pendingVideo by viewModel.pendingVideo.collectAsStateWithLifecycle()
     val unsubscribeRequest by viewModel.unsubscribeRequest.collectAsStateWithLifecycle()
     val tapFixes by viewModel.tapFixes.collectAsStateWithLifecycle()
+    val autoplayDiagnostics by viewModel.autoplayDiagnostics.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val pendingImport by viewModel.pendingImport.collectAsStateWithLifecycle()
@@ -827,6 +828,7 @@ fun StreamShieldApp(
                     lastStart = lastStart,
                     pipPauses = videoState.pipBlockedPauses to videoState.pipSystemPauses,
                     tapFixes = tapFixes.count to tapFixes.lastTop,
+                    autoplayDiagnostics = autoplayDiagnostics,
                     recentBlocked = recentBlocked,
                     onClose = viewModel::closeSettings,
                     onToggleAdBlock = viewModel::toggleAdBlock,

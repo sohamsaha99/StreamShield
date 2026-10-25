@@ -56,6 +56,14 @@ except the address bar and the bookmarks screen.
 
 - Faster starts: pruning also covers batched/wrapped responses and XHR JSON, shortens YouTube's
   17 s player timers, and removes the "Watch in the YouTube app" dialog that held back autoplay.
+- **Autoplay with the screen off and in picture-in-picture**, for videos and YouTube Music: the
+  page moves on itself when YouTube's countdown cannot run, and the notification stays in the
+  foreground between two videos so Android does not suspend the app in the gap. Mixes,
+  playlists and the Music queue always continue; suggestions follow the Autoplay setting.
+  (The video part follows the original's commits `84418cd` and `d4e373e`.)
+- **No muted starts:** videos YouTube starts muted (the first one after opening the app, links
+  opened in the app, autoplay with the screen off) play with sound; a mute chosen on the page
+  is kept.
 - Taps on YouTube's play/pause that the page missed are applied by the app and counted in
   Settings → Diagnostics; the page's PiP flag is checked against the app's.
 - Battery: the player page is kept awake in the background only while something is loaded; the
@@ -64,6 +72,8 @@ except the address bar and the bookmarks screen.
 
 ## Technical
 
+- New launcher icon (red shield with a play symbol), including a themed-icon layer for
+  Android 13+; built from `tools/icons/streamshield-logo.png` by `tools/icons/make_icons.py`.
 - Application id `com.aistudio.streamshield.vytkzp` (was `…vqxkpl`), so both apps can be
   installed side by side.
 - Room database version 4 with migrations from version 1, so an install of the original app keeps

@@ -179,6 +179,19 @@ data class UnsubscribeRequest(val channelId: String, val name: String)
 /** Taps on the page's play/pause button that the page missed (this session), for diagnostics. */
 data class TapFixInfo(val count: Int = 0, val lastTop: String = "")
 
+/**
+ * Autoplay while the app was hidden (this session), for diagnostics: how the page last moved on
+ * ([WebVideoState.autoAdvance], at [methodAt] in wall-clock ms), and how long the gap after the
+ * last video that ended in the background lasted ([gapResult], e.g. "started after 6.2 s").
+ */
+data class AutoplayDiagnostics(val method: String = "", val methodAt: Long = 0L, val gapResult: String = "")
+
+/**
+ * How long, after a video ends while the app is hidden, the notification keeps showing "playing"
+ * (foreground service and wake lock) while the next video loads.
+ */
+const val AUTOPLAY_GAP_HOLD_MS = 30_000L
+
 /** Pull distance (dp) at which a release refreshes; the indicator moves at half the finger. */
 const val PULL_REFRESH_THRESHOLD_DP = 72f
 const val PULL_DRAG_RATE = 0.5f
@@ -415,6 +428,9 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     val tapFixes: StateFlow<TapFixInfo> = _tapFixes.asStateFlow()
     private var pageTapFixes = 0
 
+    private val _autoplayDiagnostics = MutableStateFlow(AutoplayDiagnostics())
+    val autoplayDiagnostics: StateFlow<AutoplayDiagnostics> = _autoplayDiagnostics.asStateFlow()
+
     private val _lastStart = MutableStateFlow<StartDiagnostics?>(null)
     val lastStart: StateFlow<StartDiagnostics?> = _lastStart.asStateFlow()
 
@@ -455,9 +471,16 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
         viewModelScope.launch {
             PlaybackCommands.flow.collect { command ->
+                // The user paused or stopped from the notification: no more "playing" between videos.
+                if (command == PlaybackCommand.PAUSE || command == PlaybackCommand.STOP ||
+                    command == PlaybackCommand.TOGGLE
+                ) {
+                    endAutoplayGap(GapEnd.USER)
+                }
                 if (command == PlaybackCommand.STOP) {
                     bgSessionActive = false
                     lastBgSignature = ""
+                    servicePlaying = false
                 }
             }
         }
@@ -564,6 +587,9 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         if (state.tapFixes > pageTapFixes) {
             _tapFixes.value = TapFixInfo(_tapFixes.value.count + (state.tapFixes - pageTapFixes), state.tapFixTop)
             pageTapFixes = state.tapFixes
+        }
+        if (state.autoAdvance.isNotBlank() && state.autoAdvanceAt != _autoplayDiagnostics.value.methodAt) {
+            _autoplayDiagnostics.update { it.copy(method = state.autoAdvance, methodAt = state.autoAdvanceAt) }
         }
 
         if (state.startMs >= 0 && (state.videoId != previous.videoId || previous.startMs < 0)) {
@@ -769,26 +795,91 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             stopBackgroundSession()
             return
         }
+        val playing = state.isPlaying || holdThroughAutoplayGap(state)
         // Nothing to show until something actually plays; after that keep the controls updated.
-        if (!state.isPlaying && !bgSessionActive) return
-        val signature = "${state.title}|${state.channel}|${state.durationSec}|${state.isPlaying}"
+        if (!playing && !bgSessionActive) return
+        val signature = "${state.title}|${state.channel}|${state.durationSec}|$playing"
         if (signature == lastBgSignature) return
         BackgroundPlaybackService.update(
             context = getApplication(),
             title = state.title,
             artist = state.channel,
             durationSec = state.durationSec,
-            playing = state.isPlaying,
+            playing = playing,
             alreadyRunning = bgSessionActive
         )
         bgSessionActive = true
         lastBgSignature = signature
+        servicePlaying = playing
     }
 
     private fun stopBackgroundSession() {
         if (bgSessionActive) BackgroundPlaybackService.stop(getApplication())
         bgSessionActive = false
         lastBgSignature = ""
+        servicePlaying = false
+        endAutoplayGap(GapEnd.USER)
+    }
+
+    // ---- the gap between two videos while the app is hidden ----------------------------------
+    // When a video ends with the screen off, the next one takes a few seconds to start (the page
+    // opens it, see "autoplay while the app is hidden" in shield.js). Reporting "paused" to the
+    // notification service in that gap made it leave the foreground and release its wake lock:
+    // Android may then suspend the app before the next video starts, and from the background the
+    // service can neither be updated (startService is refused) nor return to the foreground
+    // (Android 12+). So for up to AUTOPLAY_GAP_HOLD_MS after a video ends while the app is hidden,
+    // the service keeps showing "playing"; the next video playing, a pause or stop from the
+    // notification, or the time limit end the gap.
+    private enum class Gap { NONE, HOLDING, OVER }
+    private enum class GapEnd { PLAYING, USER, TIMEOUT }
+    private var gap = Gap.NONE
+    private var gapStartedAt = 0L
+    private var gapJob: Job? = null
+    /** What the notification service was last told (true = playing). */
+    private var servicePlaying = false
+
+    private fun holdThroughAutoplayGap(state: WebVideoState): Boolean {
+        if (state.isPlaying) {
+            endAutoplayGap(GapEnd.PLAYING)
+            return false
+        }
+        if (gap == Gap.NONE && servicePlaying && reachedEnd(state) &&
+            _playbackSource.value == PlaybackSource.WEB &&
+            (!_appVisible.value || _isInPipMode.value)
+        ) {
+            gap = Gap.HOLDING
+            gapStartedAt = android.os.SystemClock.elapsedRealtime()
+            gapJob?.cancel()
+            gapJob = viewModelScope.launch {
+                delay(AUTOPLAY_GAP_HOLD_MS)
+                gapJob = null   // this job: endAutoplayGap must not cancel it
+                if (gap == Gap.HOLDING) {
+                    endAutoplayGap(GapEnd.TIMEOUT)
+                    syncBackgroundService(_videoState.value)
+                }
+            }
+        }
+        return gap == Gap.HOLDING
+    }
+
+    /** Ended, or paused within the last two seconds (some players pause at the end instead). */
+    private fun reachedEnd(state: WebVideoState): Boolean =
+        state.ended || (state.durationSec > 0 && state.positionSec >= state.durationSec - 2)
+
+    private fun endAutoplayGap(reason: GapEnd) {
+        if (gap == Gap.HOLDING) {
+            gapJob?.cancel()
+            gapJob = null
+            val seconds = (android.os.SystemClock.elapsedRealtime() - gapStartedAt) / 1000.0
+            val result = when (reason) {
+                GapEnd.PLAYING -> String.format(java.util.Locale.US, "started after %.1f s", seconds)
+                GapEnd.USER -> "paused or stopped from the notification"
+                GapEnd.TIMEOUT -> "nothing started within ${AUTOPLAY_GAP_HOLD_MS / 1000} s"
+            }
+            _autoplayDiagnostics.update { it.copy(gapResult = result) }
+        }
+        // Over until something plays again, so the same ended video does not start a new gap.
+        gap = if (reason == GapEnd.PLAYING) Gap.NONE else Gap.OVER
     }
 
     // ---------------------------------------------------------------------------------------

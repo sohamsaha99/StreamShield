@@ -157,7 +157,42 @@ const browser = await chromium.launch({
     args: ['--autoplay-policy=no-user-gesture-required']
 });
 
-async function openWatchPage(config = {}) {
+// Watch-next responses (/youtubei/v1/next?kind=...) for the autoplay-while-hidden tests.
+function nextResponse(kind) {
+    const next = { watchEndpoint: { videoId: 'nextVid0001', playlistId: 'RDabc', index: 3 } };
+    const item = (videoId, index, list) => ({ playlistPanelVideoRenderer: { videoId,
+        navigationEndpoint: { watchEndpoint: { videoId, playlistId: list, index } } } });
+    if (kind === 'music') {
+        // YouTube Music: the queue in a playlistPanelRenderer, songs wrapped as song/video pairs,
+        // the current song marked "selected", and (here) no currentVideoEndpoint.
+        const wrap = (videoId, index) => ({ playlistPanelVideoWrapperRenderer: { primaryRenderer: item(videoId, index, 'RDAMVMabc') } });
+        const current = item('abc123def45', 1, 'RDAMVMabc');
+        current.playlistPanelVideoRenderer.selected = true;
+        return { responseContext: {}, contents: { singleColumnMusicWatchNextResultsRenderer: { tabbedRenderer: {
+            watchNextTabbedResultsRenderer: { tabs: [{ tabRenderer: { content: { musicQueueRenderer: { content: {
+                playlistPanelRenderer: { playlistId: 'RDAMVMabc', contents: [wrap('prevSong001', 0), current, wrap('nextSong001', 2)] }
+            } } } } }] } } } } };
+    }
+    let results;
+    if (kind === 'mweb-mix') {
+        // m.youtube.com (shape seen on the live site): the queue is in playlist.playlist and the
+        // autoplay sets carry only autoplayVideo.
+        results = {
+            playlist: { playlist: { playlistId: 'RDabc', currentIndex: 2, isInfinite: true,
+                contents: [item('prevVid0001', 1, 'RDabc'), item('abc123def45', 2, 'RDabc'), item('nextVid0001', 3, 'RDabc')] } },
+            autoplay: { autoplay: { sets: [{ autoplayVideo: next }] } }
+        };
+    } else {
+        const sets = kind === 'suggestion'
+            ? [{ autoplayVideo: { watchEndpoint: { videoId: 'suggVid0001' } } }]
+            : [{ nextVideo: next, autoplayVideo: next }];
+        results = { autoplay: { autoplay: { sets } } };
+    }
+    return { responseContext: {}, currentVideoEndpoint: { watchEndpoint: { videoId: 'abc123def45' } },
+        contents: { singleColumnWatchNextResults: results } };
+}
+
+async function openWatchPage(config = {}, startUrl = 'https://m.youtube.com/watch?v=abc123def45') {
     const context = await browser.newContext();
     const page = await context.newPage();
     await page.route('**/*', async (route) => {
@@ -193,6 +228,9 @@ async function openWatchPage(config = {}) {
         if (url.pathname === '/youtubei/v1/browse') {
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(BROWSE_RESPONSE_WITH_ADS) });
         }
+        if (url.pathname === '/youtubei/v1/next') {
+            return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(nextResponse(url.searchParams.get('kind'))) });
+        }
         if (url.pathname === '/watch') {
             return route.fulfill({ status: 200, contentType: 'text/html', body: watchPage() });
         }
@@ -200,7 +238,7 @@ async function openWatchPage(config = {}) {
     });
     await page.addInitScript(bridgeInit({ adBlock: true, bgPlay: true, speed: 1.0, pip: false, sponsorSkip: true, ...config }));
     await page.addInitScript(shieldJs);
-    await page.goto('https://m.youtube.com/watch?v=abc123def45');
+    await page.goto(startUrl);
     await page.waitForFunction(() => {
         const v = document.querySelector('video');
         return v && v.readyState >= 1 && isFinite(v.duration);
@@ -808,6 +846,155 @@ console.log('Next / previous / autoplay');
     await page.waitForFunction(() => document.querySelector('video').ended, null, { timeout: 5000 });
     await sleep(500);
     check('with autoplay off, nothing happens after the video ends', (await page.evaluate(() => window.__nextCalls)) === 0);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+console.log("YouTube's muted autoplay");
+{
+    // The page starts the video muted, as m.youtube.com does when it was opened without a tap.
+    async function startMuted(page, { api = false } = {}) {
+        await page.evaluate(async (useApi) => {
+            const v = document.querySelector('video');
+            window.__unMuteCalls = 0;
+            if (useApi) {
+                const p = document.getElementById('movie_player');
+                window.__ytMuted = true;
+                p.isMuted = () => window.__ytMuted;
+                p.unMute = () => { window.__unMuteCalls++; window.__ytMuted = false; v.muted = false; };
+            }
+            v.muted = true;
+            await v.play();
+        }, api);
+        await sleep(400);
+    }
+    const isMuted = (page) => page.evaluate(() => document.querySelector('video').muted);
+
+    let { context, page } = await openWatchPage();
+    await startMuted(page, { api: true });
+    check('a video YouTube started muted plays with sound', (await isMuted(page)) === false);
+    check("unmuted through the player's API", (await page.evaluate(() => window.__unMuteCalls)) === 1);
+    // YouTube mutes again a moment later (e.g. syncing its own state): unmuted again.
+    await page.evaluate(() => { document.querySelector('video').muted = true; });
+    await sleep(300);
+    check('a later automatic mute is undone too', (await isMuted(page)) === false);
+    await context.close();
+
+    // The user mutes with the page's own mute button: kept, also on the next page in this tab.
+    ({ context, page } = await openWatchPage());
+    await page.evaluate(() => document.querySelector('video').play());
+    await page.evaluate(() => {
+        const b = document.createElement('button');
+        b.className = 'ytp-mute-button';
+        b.setAttribute('aria-label', 'Mute (m)');
+        b.innerHTML = '<span id="muteIcon">x</span>';
+        b.addEventListener('click', () => { document.querySelector('video').muted = true; });
+        document.getElementById('movie_player').appendChild(b);
+    });
+    await page.click('#muteIcon');
+    await sleep(400);
+    check("the user's own mute is kept", (await isMuted(page)) === true);
+    await page.goto('https://m.youtube.com/watch?v=abc123def45');
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return v && v.readyState >= 1; });
+    await startMuted(page);
+    check("the user's mute also holds for the next video in the tab", (await isMuted(page)) === true);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+console.log('Autoplay while the app is hidden');
+{
+    // kind: the watch-next response the page saw ('none': none was seen). The mock page's own
+    // "next track" handler only counts calls (window.__nextCalls), like a page that cannot move
+    // on by itself while nothing is drawn.
+    async function endVideo(page, kind, delays = [300, 800]) {
+        await page.evaluate(async ({ k, d }) => {
+            window.__streamShield.internals.setAdvanceDelays(d[0], d[1]);
+            if (k !== 'none') await (await fetch('/youtubei/v1/next?kind=' + k, { method: 'POST' })).json();
+            const v = document.querySelector('video');
+            v.currentTime = v.duration - 0.3;
+            await v.play();
+        }, { k: kind, d: delays });
+        await page.waitForFunction(() => document.querySelector('video').ended, null, { timeout: 5000 });
+    }
+    const otherVideo = /watch\?v=(?!abc123def45)/;
+    const lastState = (page) => page.evaluate(() => {
+        const s = window.__bridgeLog.filter((e) => e[0] === 'state');
+        return s.length ? s[s.length - 1][1] : null;
+    });
+
+    // Picture-in-picture, a playlist: opens the next video with its playlist position.
+    let { context, page } = await openWatchPage({ pip: true });
+    await endVideo(page, 'playlist');
+    await page.waitForURL(otherVideo, { timeout: 8000 }).catch(() => {});
+    check('PiP: opens the next video of the playlist with its position',
+        /watch\?v=nextVid0001&list=RDabc&index=4/.test(page.url()), page.url());
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return v && !v.paused; }, null, { timeout: 5000 }).catch(() => {});
+    check('the next video starts playing on its own', await page.evaluate(() => !document.querySelector('video').paused));
+    check('the new page reports how autoplay moved on (diagnostics)', (await lastState(page))?.adv === 'page', await lastState(page));
+    await context.close();
+
+    // Screen off, m.youtube.com mix (live-site shape), Autoplay setting off: a mix still continues.
+    ({ context, page } = await openWatchPage({ appVisible: false, autoplay: false }));
+    await endVideo(page, 'mweb-mix');
+    await page.waitForURL(otherVideo, { timeout: 8000 }).catch(() => {});
+    check('screen off: the next video of an m.youtube.com mix, even with Autoplay off',
+        /watch\?v=nextVid0001&list=RDabc&index=4/.test(page.url()), page.url());
+    check('the page\'s own next track handler is not used when the next video is known',
+        (await page.evaluate(() => window.__nextCalls)) === 0);
+    await context.close();
+
+    // Screen off, a suggestion: follows the Autoplay setting.
+    ({ context, page } = await openWatchPage({ appVisible: false, autoplay: true }));
+    await endVideo(page, 'suggestion');
+    await page.waitForURL(otherVideo, { timeout: 8000 }).catch(() => {});
+    check('screen off, Autoplay on: opens the suggested video', /watch\?v=suggVid0001$/.test(page.url()), page.url());
+    await context.close();
+
+    ({ context, page } = await openWatchPage({ appVisible: false, autoplay: false }));
+    await endVideo(page, 'suggestion');
+    await sleep(1500);
+    check('screen off, Autoplay off: a suggested video is not opened',
+        page.url().includes('abc123def45') && (await page.evaluate(() => window.__nextCalls)) === 0, page.url());
+    await context.close();
+
+    // Nothing known about the next video: the page's own next track.
+    ({ context, page } = await openWatchPage({ pip: true }));
+    await endVideo(page, 'none');
+    await sleep(1000);
+    check('no next video known: falls back to the page\'s next track',
+        (await page.evaluate(() => window.__nextCalls)) === 1 && page.url().includes('abc123def45'), page.url());
+    await context.close();
+
+    // A pause from the app (notification) right after the end cancels it.
+    ({ context, page } = await openWatchPage({ appVisible: false }));
+    await endVideo(page, 'playlist', [600, 800]);
+    await page.evaluate(() => window.__streamShield.pause());
+    await sleep(1500);
+    check('a pause from the app right after the end stops autoplay', page.url().includes('abc123def45'), page.url());
+    await context.close();
+
+    // App on screen: left to YouTube's own countdown (and the slower fallback above).
+    ({ context, page } = await openWatchPage({ appVisible: true }));
+    await endVideo(page, 'playlist');
+    await sleep(1500);
+    check('app on screen: does not open the next video itself', page.url().includes('abc123def45'), page.url());
+    await context.close();
+
+    // YouTube Music, screen off: its own next track first, then the next song's page.
+    ({ context, page } = await openWatchPage({ appVisible: false }, 'https://music.youtube.com/watch?v=abc123def45'));
+    await endVideo(page, 'music', [300, 900]);
+    const music = await page.evaluate(() => window.__streamShield.internals.nextByVideo['abc123def45'] || null);
+    check('YouTube Music queue: next song found from the selected entry',
+        music && music.endpoint.videoId === 'nextSong001' && music.inPlaylist === true, music);
+    await sleep(700);
+    check('YouTube Music: first asks the page for its next track',
+        (await page.evaluate(() => window.__nextCalls)) === 1 && page.url().includes('abc123def45'), page.url());
+    await page.waitForURL(otherVideo, { timeout: 8000 }).catch(() => {});
+    check('YouTube Music: song unchanged, so it opens the next song\'s page (no index)',
+        /^https:\/\/music\.youtube\.com\/watch\?v=nextSong001&list=RDAMVMabc$/.test(page.url()), page.url());
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return v && !v.paused; }, null, { timeout: 5000 }).catch(() => {});
+    check('YouTube Music: the next song starts playing', await page.evaluate(() => !document.querySelector('video').paused));
     await context.close();
 }
 

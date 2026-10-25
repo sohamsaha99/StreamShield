@@ -25,6 +25,15 @@ device-probe files merge cleanly. The original's app changes are small (about 22
 most conflicts are both sides adding to the same lists (config keys, preferences, settings rows,
 bridge methods), so the resolution is to keep both.
 
+Autoplay while hidden exists on both sides: this side ported the approach of `84418cd` and
+`d4e373e` into `shield.js` with the same function names (`captureNextVideo`, `nextByVideo`,
+`nextVideoUrl`, `resumeAfterAdvance`), added YouTube Music, and keeps its existing **Autoplay**
+setting (`autoplay` in the page config) instead of the original's `autoAdvance` /
+"Autoplay next video". When merging, keep this side's version of those functions and map the
+original's `autoAdvanceEnabled` preference onto `autoplayEnabled`. The original's other parts of
+`84418cd` (live streams in PiP: `resyncPlayer`, the `pipStalls` counter) are not on this side
+yet and should be taken.
+
 ## How to merge
 
 Either side can do it; keep one person resolving the conflicts.

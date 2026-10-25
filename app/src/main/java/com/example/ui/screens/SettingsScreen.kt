@@ -56,6 +56,7 @@ import com.example.data.ShieldPreferencesState
 import com.example.data.formatCount
 import com.example.data.formatSpeedBadge
 import com.example.ui.BlockCounts
+import com.example.ui.AutoplayDiagnostics
 import com.example.ui.StartDiagnostics
 import com.example.download.SmartDownloads
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -74,6 +75,8 @@ fun SettingsScreen(
     onClose: () -> Unit,
     /** Play/pause taps the page missed and the app applied (this session), and what was on top. */
     tapFixes: Pair<Int, String> = 0 to "",
+    /** Autoplay while the app was hidden (this session). */
+    autoplayDiagnostics: AutoplayDiagnostics = AutoplayDiagnostics(),
     onToggleAdBlock: (Boolean) -> Unit,
     onToggleSponsorSkip: (Boolean) -> Unit,
     onToggleBackgroundPlay: (Boolean) -> Unit,
@@ -156,6 +159,7 @@ fun SettingsScreen(
                         lastStart = lastStart,
                         pipPauses = pipPauses,
                         tapFixes = tapFixes,
+                        autoplay = autoplayDiagnostics,
                         recentBlocked = recentBlocked,
                         showStartTime = preferences.showStartTime,
                         onToggleShowStartTime = onToggleShowStartTime
@@ -188,7 +192,7 @@ fun SettingsScreen(
                             icon = Icons.Default.SkipNext,
                             iconTint = EmeraldSafe,
                             title = "Autoplay",
-                            subtitle = "Play the next video or song when one ends, also in the background and in picture-in-picture",
+                            subtitle = "Play the next video or song when one ends, also with the screen off and in picture-in-picture. When off, only playlists, mixes and YouTube Music's queue continue in the background",
                             checked = preferences.autoplayEnabled,
                             onCheckedChange = onToggleAutoplay,
                             testTag = "setting_autoplay_switch"
@@ -417,6 +421,7 @@ private fun DiagnosticsCard(
     lastStart: StartDiagnostics?,
     pipPauses: Pair<Int, Int>,
     tapFixes: Pair<Int, String>,
+    autoplay: AutoplayDiagnostics,
     recentBlocked: List<String>,
     showStartTime: Boolean,
     onToggleShowStartTime: (Boolean) -> Unit
@@ -468,6 +473,20 @@ private fun DiagnosticsCard(
         if (tapFixes.first > 0) {
             DiagnosticLine("Play/pause taps the page missed (fixed)", tapFixes.first.toString())
             DiagnosticLine("On top of the button", tapFixes.second.ifBlank { "?" })
+        }
+        if (autoplay.method.isNotBlank()) {
+            val how = when (autoplay.method) {
+                "page" -> "opened the next video"
+                "queue" -> "YouTube Music's next track"
+                "player" -> "the page's next track"
+                "none" -> "nothing to play next"
+                else -> autoplay.method
+            }
+            val at = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(java.util.Date(autoplay.methodAt))
+            DiagnosticLine("Autoplay in the background ($at)", how)
+        }
+        if (autoplay.gapResult.isNotBlank()) {
+            DiagnosticLine("Next video after one ended in the background", autoplay.gapResult)
         }
         if (recentBlocked.isNotEmpty()) {
             Spacer(modifier = Modifier.height(10.dp))
