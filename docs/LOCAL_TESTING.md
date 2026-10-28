@@ -4,9 +4,8 @@ How to build StreamShield in the Docker dev environment, and what an AI agent (o
 should test once there is real internet access, including YouTube. Read
 [ARCHITECTURE.md](../ARCHITECTURE.md) and [AGENTS.md](../AGENTS.md) first.
 
-So far the app has only been tested in two ways: `shield.js` against **mock** YouTube pages in
-headless Chromium, and by the owner on a phone. Everything YouTube-specific below is the part
-that still needs checking against the real site.
+`shield.js` is tested against **mock** YouTube pages in headless Chromium; the plan below checks
+the real site on an emulator or phone. Earlier runs are in [test-reports/](test-reports/).
 
 ---
 
@@ -139,8 +138,9 @@ This covers ad pruning and player hooks, but not Android behaviour (PiP, backgro
 
 ## 5. What to test
 
-Record pass/fail, numbers and screenshots for each item. Items marked **(open)** were reported
-by the owner or never verified; prioritise them.
+Record pass/fail, numbers and screenshots for each item. Also run the device checks in
+[AGENTS.md → Verifying changes](../AGENTS.md#verifying-changes), which cover the tabs, browse
+page, Music, downloads, pull-to-refresh and Subscribe buttons.
 
 ### A. Ad blocking
 1. **Pre-roll.** Open 10 different popular videos. No ad plays, and Diagnostics shows "Time in
@@ -192,7 +192,7 @@ by the owner or never verified; prioritise them.
 5. **Swiping the app from Recents** stops the service:
    `adb shell dumpsys activity services com.aistudio.streamshield.vqxkpl` shows none.
 
-### F. Autoplay next video (mixes/playlists fixed and passed on the emulator, 2026-10-24)
+### F. Autoplay (mixes/playlists fixed and passed on the emulator, 2026-10-24)
 1. **Mix in PiP:** open a mix (`list=RD…`), seek to 5 s before the end (CDP:
    `v.currentTime = v.duration - 5`), and enter PiP. Within ~6 s of the end, the next video of
    the mix plays, and `index` in the URL increases.
@@ -207,7 +207,8 @@ by the owner or never verified; prioritise them.
 2. Back on the root page while playing (background play on): the app goes to the background and
    keeps playing.
 3. Deep links: `youtu.be/<id>` and `m.youtube.com/watch?v=<id>` intents open in the app.
-4. Bookmarks and history: add, open and delete.
+4. Library: history, Watch later and a playlist; add, open and remove entries. Export a backup and
+   import it again (Settings).
 
 ### H. Performance and battery
 1. CPU while playing in the foreground, PiP and background, 5 minutes each:

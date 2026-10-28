@@ -69,7 +69,9 @@ JitPack (NewPipe Extractor).
 ```
 
 The repository has `gradle/wrapper/gradle-wrapper.properties` but no `gradlew` script: run
-`gradle wrapper` once, or open the project in Android Studio. Release signing reads
+`tools/dev-setup.sh` once (it also creates the git-ignored `debug.keystore` that debug builds are
+signed with; restore the shared key there first, see [Signing](#signing)), or open the project in
+Android Studio. Release signing reads
 `KEYSTORE_PATH`, `STORE_PASSWORD` and `KEY_PASSWORD` from the environment.
 
 Tests for the injected page script run in headless Chromium:
@@ -139,7 +141,7 @@ Studio installs and GitHub builds do not install over each other.
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the app is put together and why.
 - [AGENTS.md](AGENTS.md): working notes for contributors and AI coding agents.
-- [CHANGELOG.md](CHANGELOG.md): what changed compared with the original StreamShield.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release.
 - [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md): the Docker dev environment, CDP inspection and the
   on-device test plan.
 

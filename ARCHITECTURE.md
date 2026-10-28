@@ -147,8 +147,9 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
      off, as a short note when a video starts. For in-page navigation, timing starts at the user's
      last tap (the URL only changes, via `history.pushState`, once the data has arrived).
 5. **Native → page API:** `window.__streamShield.setConfig`, `setSponsorSegments`, `play`, `pause`,
-   `togglePlay`, `exitFullscreen`, `nudgeLayout`, `refreshSubscribeButtons`, `resumeMusic`,
-   `seekWhenReady`.
+   `togglePlay`, `next`, `previous`, `exitFullscreen`, `nudgeLayout`, `refreshSubscribeButtons`,
+   `resumeMusic`, `seekWhenReady`. `getConfig`, `reportState` and `internals` are for tests and
+   CDP debugging.
 6. **Play/pause taps:** a tap on a visible play/pause control in the player that has not changed
    playback 400 ms later is applied by the app (`pauseVideo` / `resumeVideo`). Each fix is counted
    with the element that was on top at the tapped point (`tapFix`, `tapTop` in the state report;

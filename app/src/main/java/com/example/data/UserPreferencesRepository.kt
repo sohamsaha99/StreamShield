@@ -170,6 +170,7 @@ class UserPreferencesRepository(private val context: Context) {
         .put("rememberSpeedAcrossVideos", p.rememberSpeedAcrossVideos)
         .put("historyPaused", p.historyPaused)
         .put("autoplayEnabled", p.autoplayEnabled)
+        .put("showStartTime", p.showStartTime)
         .put("smartSizeMb", p.smartSizeMb)
         .put("downloadVideoQuality", p.downloadVideoQuality)
         .put("downloadMusicQuality", p.downloadMusicQuality)
@@ -190,6 +191,7 @@ class UserPreferencesRepository(private val context: Context) {
             bool("rememberSpeedAcrossVideos", Keys.REMEMBER_SPEED)
             bool("historyPaused", Keys.HISTORY_PAUSED)
             bool("autoplayEnabled", Keys.AUTOPLAY)
+            bool("showStartTime", Keys.SHOW_START_TIME)
             fun int(name: String, key: Preferences.Key<Int>) {
                 if (json.has(name)) prefs[key] = json.optInt(name)
             }

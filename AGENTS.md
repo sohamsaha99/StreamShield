@@ -21,7 +21,7 @@ first for the component map; this file covers commands, conventions and pitfalls
 
 If you are running in the Docker dev container (`Dockerfile`) or another environment with
 internet access and a device/emulator, follow [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md):
-setup, inspecting the live YouTube page over CDP, and the test plan, with open items first.
+setup, inspecting the live YouTube page over CDP, and the test plan.
 
 ## Commands
 
@@ -32,10 +32,9 @@ NODE_PATH=$(npm root -g) node tools/shield-js-test/shield.test.mjs   # shield.js
 node --check app/src/main/assets/shield.js                          # quick syntax check
 ```
 
-- There is no `gradlew` script checked in. `tools/dev-setup.sh` generates it (Gradle 9.3.1), plus
-  the git-ignored `debug.keystore` that debug builds are signed with, and `local.properties`; or
-  use Android Studio. GitHub Actions builds every push to `main` and publishes the APK as the `latest`
-  release (`.github/workflows/build-apk.yml`).
+- There is no `gradlew` script checked in. `tools/dev-setup.sh` generates it, plus the git-ignored
+  `debug.keystore` that debug builds are signed with, and `local.properties`; or use Android
+  Studio. CI and releases: [README → Build on GitHub](README.md#build-on-github).
 - The build needs Google Maven (`dl.google.com`), Maven Central and JitPack. In sandboxes without
   them, run at least the shield.js tests; the pure-Kotlin rules (`download/SmartRule.kt`,
   `recommend/ForYouRule.kt`, `engine/RequestFilter.kt`) compile in a plain Kotlin/JVM project.

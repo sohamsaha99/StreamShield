@@ -131,8 +131,6 @@ class BrowserController(
     /** URL of the previous page of the current visit, or null. */
     fun previousUrlInSession(): String? = if (canGoBackInSession()) previousUrl() else null
 
-    fun reload() = webView.reload()
-
     /** YouTube Music song to start again after a pull-to-refresh reload (id, position). */
     private var resumeAfterReload: Pair<String, Int>? = null
     /** After the fallback (opening the song's page): seek there once it loads. */
@@ -160,12 +158,10 @@ class BrowserController(
         load("$MUSIC_HOME_URL/watch?v=$videoId")
     }
 
-    private var lastResume: Pair<String, Int>? = null
-
-    fun canGoBack(): Boolean = webView.canGoBack()
+    @Volatile private var lastResume: Pair<String, Int>? = null
 
     /** URL of the previous history entry, or null (used to keep Back inside YouTube Music). */
-    fun previousUrl(): String? {
+    private fun previousUrl(): String? {
         val list = webView.copyBackForwardList()
         val index = list.currentIndex - 1
         return if (index >= 0) list.getItemAtIndex(index)?.url else null
@@ -173,10 +169,6 @@ class BrowserController(
 
     fun goBack() {
         if (webView.canGoBack()) webView.goBack()
-    }
-
-    fun goForward() {
-        if (webView.canGoForward()) webView.goForward()
     }
 
     fun play() = runPageCommand("play()")
@@ -189,8 +181,6 @@ class BrowserController(
     fun next() = runPageCommand("next()")
 
     fun previous() = runPageCommand("previous()")
-
-    val isFullscreen: Boolean get() = fullscreenView != null
 
     fun exitFullscreen() {
         if (fullscreenView == null) return
@@ -360,7 +350,7 @@ class BrowserController(
             mainHandler.post { if (!destroyed && webView.canGoBack()) webView.goBack() }
             return
         }
-        viewModel.onPageChanged(url, view.title, view.canGoBack(), view.canGoForward(), loading)
+        viewModel.onPageChanged(url, loading)
     }
 
     private inner class PageBridge {

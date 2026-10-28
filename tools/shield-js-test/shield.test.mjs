@@ -632,6 +632,40 @@ console.log('Ad fallback (ad still starts)');
     await context.close();
 }
 
+// The player element re-created while an ad shows (YouTube does this on some navigations): the
+// skip timer must stop and sound/speed come back, or the next videos get skipped muted.
+{
+    const { context, page } = await openWatchPage({ speed: 1.25 });
+    await page.evaluate(() => document.querySelector('video').play());
+    await sleep(300);
+    await page.evaluate(() => document.getElementById('movie_player').classList.add('ad-showing'));
+    await sleep(150);
+    await page.evaluate(() => {
+        const old = document.getElementById('movie_player');
+        const fresh = document.createElement('div');
+        fresh.id = 'movie_player';
+        fresh.className = 'html5-video-player';
+        fresh.appendChild(document.querySelector('video'));
+        old.replaceWith(fresh);
+        window.dispatchEvent(new Event('yt-navigate-finish'));   // re-hooks the player now
+    });
+    await sleep(300);
+    await page.evaluate(() => {
+        const v = document.querySelector('video');
+        v.currentTime = 1;
+        v.play();
+    });
+    await sleep(500);
+    const swapped = await page.evaluate(() => {
+        const v = document.querySelector('video');
+        return { muted: v.muted, rate: v.playbackRate, t: v.currentTime, d: v.duration };
+    });
+    check('player swapped mid-ad: sound restored', swapped.muted === false, swapped);
+    check('player swapped mid-ad: speed restored', Math.abs(swapped.rate - 1.25) < 0.01, swapped);
+    check('player swapped mid-ad: content is not fast-forwarded', swapped.d - swapped.t > 1, swapped);
+    await context.close();
+}
+
 // ---------------------------------------------------------------------------------------------
 console.log('Background play');
 {

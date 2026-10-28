@@ -273,7 +273,7 @@
             return;
         }
         try { noteChannel(obj); } catch (e) {}
-        try {
+        if (!isBrowsePage()) try {
             captureNextVideo(obj);
             if (obj.response) captureNextVideo(obj.response);
             if (obj.watchNextResponse) captureNextVideo(obj.watchNextResponse);
@@ -382,7 +382,7 @@
     }
 
     // Expose pure helpers for tests.
-    var internals = { pruneResponse: pruneResponse, isAdItem: isAdItem, noteDetails: noteDetails, nextByVideo: nextByVideo };
+    var internals = { nextByVideo: nextByVideo };
     internals.setAutoplayDelay = function (ms) { AUTOPLAY_DELAY_MS = ms; };
     internals.setAdvanceDelays = function (first, musicFallback) {
         ADVANCE_DELAY_MS = first;
@@ -1205,14 +1205,15 @@
         if (isBrowsePage()) return;
         var video = hookedVideo;
         var playing = !!(video && !video.paused && !video.ended && !adActive);
-        var title = textOf('.slim-video-information-title, ytm-slim-video-metadata-section-renderer h2, h1.title') ||
-            (document.title || '').replace(/ - YouTube( Music)?$/, '').replace(/^YouTube( Music)?$/, '');
-        var channel = textOf('ytm-slim-owner-renderer .slim-owner-channel-name, .slim-owner-icon-and-title .subhead, #channel-name a');
         var videoId = currentVideoId();
-        if (!videoId && location.hostname === 'music.youtube.com' && details && video && !video.ended) {
+        if (!videoId && isMusicSite() && details && video && !video.ended) {
             videoId = details.videoId;
         }
         var d = details && details.videoId === videoId ? details : null;
+        // The player response names title and channel; the page is read only as a fallback.
+        var title = d && d.title ? '' : textOf('.slim-video-information-title, ytm-slim-video-metadata-section-renderer h2, h1.title') ||
+            (document.title || '').replace(/ - YouTube( Music)?$/, '').replace(/^YouTube( Music)?$/, '');
+        var channel = d && d.author ? '' : textOf('ytm-slim-owner-renderer .slim-owner-channel-name, .slim-owner-icon-and-title .subhead, #channel-name a');
         if (video && !adActive) {
             // Paused: exact position (used to resume). Playing: 10 s steps, so the state is not
             // re-reported every tick.
@@ -1380,8 +1381,8 @@
         return 'restart';
     }
 
-    // If the page has not moved on by itself a few seconds after a video ended (YouTube's own
-    // autoplay can be off or throttled in the background / PiP), go to the next one.
+    // On screen: if the page has not moved on by itself a few seconds after a video ended
+    // (YouTube's own autoplay can be off), go to the next one. Hidden: scheduleAutoAdvance().
     var autoplayTimer = null;
     function scheduleAutoplay() {
         if (autoplayTimer) clearTimeout(autoplayTimer);
@@ -1390,7 +1391,7 @@
         autoplayTimer = setTimeout(function () {
             autoplayTimer = null;
             var v = findVideo();
-            if (config.autoplay && !adActive && currentVideoId() === endedId && v && v.ended) next();
+            if (config.autoplay && !adActive && !userPaused && currentVideoId() === endedId && v && v.ended) next();
         }, AUTOPLAY_DELAY_MS);
     }
     var AUTOPLAY_DELAY_MS = 4000;
@@ -1445,6 +1446,7 @@
     function cancelAutoAdvance() {
         advanceTimers.forEach(clearTimeout);
         advanceTimers = [];
+        if (autoplayTimer) { clearTimeout(autoplayTimer); autoplayTimer = null; }
     }
 
     function noteAdvance(how) {
@@ -1521,7 +1523,8 @@
         if (player && player !== hookedPlayer) {
             if (playerObserver) playerObserver.disconnect();
             hookedPlayer = player;
-            adActive = false;
+            // adActive is kept: if the new player shows no ad, onAdStateChanged() below restores
+            // sound and speed and stops the skip timer (resetting it here left the timer running).
             if (typeof MutationObserver === 'function') {
                 // Only the player's own class attribute: cheap, and it is where YouTube flags ads.
                 playerObserver = new MutationObserver(onAdStateChanged);
@@ -1596,7 +1599,8 @@
     function start() {
         tick();
         // YouTube is a single-page app: re-check after its own navigation events and on a slow
-        // heartbeat for title changes and player re-creation. All work in tick() is O(1) lookups.
+        // heartbeat for title changes and player re-creation (tick() skips page tidying while
+        // the app is hidden).
         ['yt-navigate-finish', 'state-navigateend', 'yt-page-data-updated', 'popstate'].forEach(function (type) {
             window.addEventListener(type, function () {
                 setTimeout(tick, 50);

@@ -80,10 +80,7 @@ const val MUSIC_HOME_URL = "https://music.youtube.com"
 
 data class BrowserUiState(
     val url: String = HOME_URL,
-    val title: String = "",
-    val isLoading: Boolean = false,
-    val canGoBack: Boolean = false,
-    val canGoForward: Boolean = false
+    val isLoading: Boolean = false
 )
 
 data class BlockCounts(val ads: Long = 0L, val requests: Long = 0L)
@@ -252,8 +249,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Requests for the activity to load a URL in the WebView (the controller lives there).
-    private val _openUrlRequests = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
-    val openUrlRequests: kotlinx.coroutines.flow.SharedFlow<String> = _openUrlRequests
+    private val _openUrlRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val openUrlRequests: SharedFlow<String> = _openUrlRequests
 
     private val _pendingImport = MutableStateFlow<PendingImport?>(null)
     val pendingImport: StateFlow<PendingImport?> = _pendingImport.asStateFlow()
@@ -292,8 +289,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     val browsePage: StateFlow<BrowsePageState> = _browsePage.asStateFlow()
 
     // Requests for the activity to load a URL in the browse page.
-    private val _browseRequests = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
-    val browseRequests: kotlinx.coroutines.flow.SharedFlow<String> = _browseRequests
+    private val _browseRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val browseRequests: SharedFlow<String> = _browseRequests
 
     private val _playbackSource = MutableStateFlow(PlaybackSource.WEB)
     val playbackSource: StateFlow<PlaybackSource> = _playbackSource.asStateFlow()
@@ -305,8 +302,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _downloadSheet = MutableStateFlow<DownloadSheetState?>(null)
     val downloadSheet: StateFlow<DownloadSheetState?> = _downloadSheet.asStateFlow()
 
-    private val _offlinePlayRequests = kotlinx.coroutines.flow.MutableSharedFlow<OfflinePlayRequest>(extraBufferCapacity = 2)
-    val offlinePlayRequests: kotlinx.coroutines.flow.SharedFlow<OfflinePlayRequest> = _offlinePlayRequests
+    private val _offlinePlayRequests = MutableSharedFlow<OfflinePlayRequest>(extraBufferCapacity = 2)
+    val offlinePlayRequests: SharedFlow<OfflinePlayRequest> = _offlinePlayRequests
 
     /** The offline player fills the screen (true) or shows as the mini-player (false). */
     private val _offlineExpanded = MutableStateFlow(false)
@@ -448,6 +445,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BlockCounts())
     private var flushJob: Job? = null
     private val flushMutex = Mutex()
+    private val progressMutex = Mutex()
 
     private var bannerJob: Job? = null
     private var sponsorJob: Job? = null
@@ -464,10 +462,11 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         }
         viewModelScope.launch(Dispatchers.IO) {
             library.ensureBuiltInPlaylists()
-            // Refresh subscriptions on start if the last refresh is older than an hour.
+            // Refresh subscriptions on start if the last refresh is older than an hour. The newest
+            // refresh decides: a channel whose feed keeps failing never gets a new time.
             val subs = library.allSubscriptions()
-            val oldest = subs.minOfOrNull { it.lastRefreshedAt } ?: Long.MAX_VALUE
-            if (subs.isNotEmpty() && System.currentTimeMillis() - oldest > 60 * 60_000L) refreshFeeds()
+            val newest = subs.maxOfOrNull { it.lastRefreshedAt } ?: Long.MAX_VALUE
+            if (subs.isNotEmpty() && System.currentTimeMillis() - newest > 60 * 60_000L) refreshFeeds()
         }
         viewModelScope.launch {
             PlaybackCommands.flow.collect { command ->
@@ -501,15 +500,9 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     // Navigation & page state
     // ---------------------------------------------------------------------------------------
 
-    fun onPageChanged(url: String, title: String?, canBack: Boolean, canForward: Boolean, loading: Boolean) {
+    fun onPageChanged(url: String, loading: Boolean) {
         val previousUrl = _browserState.value.url
-        _browserState.value = BrowserUiState(
-            url = url,
-            title = title?.takeIf { it.isNotBlank() && !it.startsWith("http") } ?: _browserState.value.title,
-            isLoading = loading,
-            canGoBack = canBack,
-            canGoForward = canForward
-        )
+        _browserState.value = BrowserUiState(url = url, isLoading = loading)
         if (url != previousUrl) {
             _webPageUrl.value = url
             handleSearchPage(url)
@@ -661,7 +654,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         val writeMetadata = newSession || (state.channelId.isNotBlank() && metadataWrittenFor != state.videoId)
         if (state.channelId.isNotBlank()) metadataWrittenFor = state.videoId
         val snapshot = state
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) { progressMutex.withLock {
             if (writeMetadata) {
                 library.rememberVideo(
                     videoId = snapshot.videoId,
@@ -674,7 +667,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
                 )
             }
             library.recordProgress(snapshot.videoId, position, duration, snapshot.isMusic, newSession)
-        }
+        } }
         playLog.trySend(
             if (newSession) {
                 PlayLogOp.Start(state.videoId, System.currentTimeMillis(), position, duration, state.isMusic)
@@ -757,6 +750,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         scheduleCountFlush()
     }
 
+    @Synchronized
     private fun scheduleCountFlush() {
         if (flushJob?.isActive == true) return
         flushJob = viewModelScope.launch {
@@ -908,6 +902,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
 
     fun showBanner(message: String) = showBannerFor(message, 2500L)
 
+    @Synchronized
     private fun showBannerFor(message: String, durationMs: Long) {
         bannerJob?.cancel()
         _statusBanner.value = message

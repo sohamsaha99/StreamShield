@@ -1,25 +1,42 @@
 # Changelog
 
-Changes in this fork ([somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2))
-compared with the original [StreamShield](https://github.com/sohamsaha99/StreamShield) at commit
-`574d020` ("Stop PiP stutter"), where the fork started. Everything from the original is kept
-except the address bar and the bookmarks screen.
+Releases are published from version tags: <https://github.com/streamshield-app/StreamShield/releases>.
 
-## Merged back into StreamShield (2026-10-28)
+## Unreleased
 
-The fork was merged into the original, now
-[streamshield-app/StreamShield](https://github.com/streamshield-app/StreamShield), together with the original's newer commits (`84418cd` to `a6e2bc8`):
+- Ad blocking: if YouTube re-created its player while an ad was showing, the ad skipper kept
+  running and skipped and muted the following videos; it now restores sound and speed and stops.
+- Autoplay: a pause from the notification or lock screen after a video ended on screen no longer
+  lets the app open the next video a few seconds later.
+- Library and downloads: subscriptions no longer refresh in full on every start when one channel's
+  feed keeps failing; backup and Takeout imports run in one transaction (all or nothing, faster);
+  backups include "Show start time"; a download deleted while it was being saved no longer leaves
+  its file behind; smart downloads are no longer scheduled when turned off, and finished songs
+  whose file is gone are cleaned up; play-progress writes no longer race.
+- Build: unit tests run before an APK is published; GitHub Actions updated to their Node 24
+  versions.
+- Clean-up: unused code, resources (about 1.2 MB of images), dependencies and the template unit
+  test removed; documentation brought up to date.
+
+## 1.0.0 (2026-10-28)
+
+The first release from [streamshield-app/StreamShield](https://github.com/streamshield-app/StreamShield):
+the original StreamShield merged with [somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2),
+a fork started from the original's commit `574d020` ("Stop PiP stutter"). Everything from the
+original is kept except the address bar and the bookmarks screen.
 
 - Autoplay while hidden: the fork's version is kept (it covers YouTube Music and diagnostics).
   The original's "Autoplay next video" setting is folded into **Autoplay**; a value saved under
   its old key (`auto_advance`) is used until Autoplay is changed.
-- Taken from the original: live streams keep loading in PiP (`resyncPlayer()`), the PiP stall
-  counter in Diagnostics, WebView debugging in debug builds, the Docker dev environment,
-  `docs/LOCAL_TESTING.md` and `tools/device-probe`.
-- The application id is the original's `com.aistudio.streamshield.vqxkpl` again, so the merged app
-  updates an existing install in place (the database migrations keep its watch history).
+- From the original's later commits (`84418cd` to `a6e2bc8`): live streams keep loading in PiP
+  (`resyncPlayer()`), the PiP stall counter in Diagnostics, WebView debugging in debug builds, the
+  Docker dev environment, `docs/LOCAL_TESTING.md` and `tools/device-probe`.
+- The application id is the original's `com.aistudio.streamshield.vqxkpl`, so the app updates an
+  install of the original in place (the database migrations keep its watch history).
 
-## Navigation and screens
+What the fork added:
+
+### Navigation and screens
 
 - **YouTube-app layout:** native tabs Home · Music · Subscriptions · Library, shown on every
   browsing page. A video fills the screen with the app's player controls (Minimize, Save,
@@ -37,7 +54,7 @@ The fork was merged into the original, now
 - Removed: the address bar and the bookmarks screen (bookmark data stays in the database and in
   backups).
 
-## Library (stored on the phone, no account)
+### Library (stored on the phone, no account)
 
 - History with resume (Continue watching, Recently watched), Watch later, Liked videos,
   playlists, "Not interested", search history.
@@ -48,13 +65,13 @@ The fork was merged into the original, now
 - **Backups:** export/import of the library and settings as one file, an optional daily backup
   into a folder you pick, and import of YouTube watch history from Google Takeout.
 
-## Music
+### Music
 
 - YouTube Music in the Music tab, with the app's tabs under it; songs keep playing in the
   background but keep neither the screen on nor open picture-in-picture.
 - Pull-to-refresh in the Music tab restarts the song that was playing from the same point.
 
-## Downloads
+### Downloads
 
 - **Downloads of any video or song** (NewPipe Extractor): a quality sheet (remembered per kind),
   audio-only for songs by default, H.264+AAC → MP4 or VP9+Opus → WebM, merged on the phone, saved
@@ -66,7 +83,7 @@ The fork was merged into the original, now
   ones from YouTube's related lists, refreshed daily on Wi-Fi while charging
   (`download/SmartRule.kt`, reviewed rule); kept inside the app.
 
-## Playback and ad blocking
+### Playback and ad blocking
 
 - Faster starts: pruning also covers batched/wrapped responses and XHR JSON, shortens YouTube's
   17 s player timers, and removes the "Watch in the YouTube app" dialog that held back autoplay.
@@ -84,12 +101,10 @@ The fork was merged into the original, now
   page script's heartbeat slows down in the background; the browse page pauses when hidden; only
   videos (not songs) keep the screen on or enter picture-in-picture.
 
-## Technical
+### Technical
 
 - New launcher icon (red shield with a play symbol), including a themed-icon layer for
   Android 13+; built from `tools/icons/streamshield-logo.png` by `tools/icons/make_icons.py`.
-- Application id `com.aistudio.streamshield.vytkzp` (was `…vqxkpl`), so both apps could be
-  installed side by side; back to `…vqxkpl` since the merge.
 - Room database version 4 with migrations from version 1, so an install of the original app keeps
   its watch history if it is updated to this version (same application id and signing key
   required).
