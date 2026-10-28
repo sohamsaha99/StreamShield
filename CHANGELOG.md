@@ -2,7 +2,7 @@
 
 Releases are published from version tags: <https://github.com/streamshield-app/StreamShield/releases>.
 
-## Unreleased
+## 1.0.1 (2026-10-28)
 
 - Ad blocking: if YouTube re-created its player while an ad was showing, the ad skipper kept
   running and skipped and muted the following videos; it now restores sound and speed and stops.
