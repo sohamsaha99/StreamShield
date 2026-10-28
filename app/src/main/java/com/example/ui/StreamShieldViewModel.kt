@@ -139,8 +139,10 @@ data class OfflinePlayRequest(val items: List<OfflineItemEntity>, val index: Int
 private const val MAX_LISTEN_STEP_SEC = 45
 
 /** The opening-video placeholder goes away after this at most, or this long after the page loaded. */
-private const val PENDING_MAX_MS = 8_000L
+private const val PENDING_MAX_MS = 5_000L
 private const val PENDING_AFTER_LOAD_MS = 2_500L
+/** After the new video's page reports itself: time for YouTube to draw it, then it shows. */
+private const val PENDING_AFTER_PAGE_MS = 1_200L
 
 /** A refresh spinner on a web page stops after this at most. */
 private const val WEB_REFRESH_MAX_MS = 12_000L
@@ -376,6 +378,7 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     fun setAppVisible(visible: Boolean) {
         _appVisible.value = visible
         if (visible && _currentTab.value == AppTab.HOME) refreshForYou(force = false)
+        if (!visible) viewModelScope.launch(Dispatchers.IO) { forYou.persist() }
     }
 
     // ---- For you (Home) ----
@@ -410,10 +413,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
     private val _pendingVideo = MutableStateFlow<PendingVideo?>(null)
     val pendingVideo: StateFlow<PendingVideo?> = _pendingVideo.asStateFlow()
     private var pendingVideoJob: Job? = null
+    /** When the placeholder's current clear job fires (uptime ms); later requests do not delay it. */
+    private var pendingClearAt = Long.MAX_VALUE
 
     // ---- Subscribe buttons on YouTube pages ----
     private val _unsubscribeRequest = MutableStateFlow<UnsubscribeRequest?>(null)
     val unsubscribeRequest: StateFlow<UnsubscribeRequest?> = _unsubscribeRequest.asStateFlow()
+    // ---- YouTube's Like / Dislike buttons (kept in the app) ----
+    @Volatile
+    private var likedSnapshot: Set<String> = emptySet()
+    @Volatile
+    private var dislikedSnapshot: Set<String> = emptySet()
+    private val _likesChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    /** Likes or dislikes changed: the page's Like buttons show the new state. */
+    val likesChanged: SharedFlow<Unit> = _likesChanged
+    private var lastLikeTap = 0L
+
     private val _subscriptionsChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     /** The pages re-check their Subscribe buttons when this fires. */
     val subscriptionsChanged: SharedFlow<Unit> = _subscriptionsChanged
@@ -488,6 +503,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             library.subscribedIds.collect { ids ->
                 subscribedSnapshot = ids
                 _subscriptionsChanged.tryEmit(Unit)
+            }
+        }
+        viewModelScope.launch {
+            playlists
+                .map { lists -> lists.firstOrNull { it.builtIn == BuiltInPlaylist.LIKED.name }?.id }
+                .distinctUntilChanged()
+                .flatMapLatest { id -> if (id == null) flowOf(emptyList()) else library.playlistVideos(id) }
+                .collect { videos ->
+                    likedSnapshot = videos.mapTo(HashSet()) { it.videoId }
+                    _likesChanged.tryEmit(Unit)
+                }
+        }
+        viewModelScope.launch {
+            library.feedbackTargets(FeedbackType.DISLIKED).collect { ids ->
+                dislikedSnapshot = ids.toHashSet()
+                _likesChanged.tryEmit(Unit)
             }
         }
         viewModelScope.launch(Dispatchers.IO) { loadChannelHandles() }
@@ -581,7 +612,13 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         _videoState.value = state
 
         _pendingVideo.value?.let { pending ->
-            if (state.videoId == pending.videoId && (state.isPlaying || state.positionSec > 0 || state.ended)) clearPendingVideo()
+            if (state.videoId == pending.videoId) {
+                // Playing: show the page now. Otherwise the new video's page is there (its script
+                // reported it): give YouTube a moment to draw it. (Waiting for "playing" alone
+                // left the placeholder up for its full time on a phone.)
+                if (state.isPlaying || state.positionSec > 0 || state.ended) clearPendingVideo()
+                else schedulePendingClear(PENDING_AFTER_PAGE_MS)
+            }
         }
         if (state.tapFixes < pageTapFixes) pageTapFixes = 0   // a new page counts from zero
         if (state.tapFixes > pageTapFixes) {
@@ -1040,6 +1077,8 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         val id = extractYouTubeVideoId(url)
         if (id != null && isYouTubeVideoPage(url) && id != _videoState.value.videoId) {
             val known = knownVideo(id)
+            pendingVideoJob?.cancel()
+            pendingClearAt = Long.MAX_VALUE
             _pendingVideo.value = PendingVideo(id, known?.first.orEmpty(), known?.second.orEmpty())
             schedulePendingClear(PENDING_MAX_MS)
         }
@@ -1056,16 +1095,22 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
         return null
     }
 
+    /** Hides the placeholder after [afterMs], unless it is already due to go sooner. */
     private fun schedulePendingClear(afterMs: Long) {
+        val at = android.os.SystemClock.uptimeMillis() + afterMs
+        if (pendingVideoJob?.isActive == true && at >= pendingClearAt) return
         pendingVideoJob?.cancel()
+        pendingClearAt = at
         pendingVideoJob = viewModelScope.launch {
             delay(afterMs)
             _pendingVideo.value = null
+            pendingClearAt = Long.MAX_VALUE
         }
     }
 
     private fun clearPendingVideo() {
         pendingVideoJob?.cancel()
+        pendingClearAt = Long.MAX_VALUE
         _pendingVideo.value = null
     }
 
@@ -1231,6 +1276,58 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             library.setFeedback(video.videoId, FeedbackType.NOT_INTERESTED, true)
             forYou.remove(video.videoId)
             showBanner("Got it: fewer videos like this")
+        }
+    }
+
+    /** Home reached the end of the loaded "For you" videos: add more. */
+    fun forYouLoadMore() {
+        viewModelScope.launch(Dispatchers.IO) {
+            forYou.extend(prefsRepo.preferencesFlow.first().starredChannels)
+        }
+    }
+
+    /** "For you" videos that were on screen (they count as shown in the next list). */
+    fun forYouSeen(videoIds: Collection<String>) = forYou.markSeen(videoIds)
+
+    /** A "For you" video was opened (so it was not skipped). */
+    fun forYouOpened(videoId: String) = forYou.opened(videoId)
+
+    // ---------------------------------------------------------------------------------------
+    // YouTube's Like / Dislike buttons on a video page (kept in the app; no Google account)
+    // ---------------------------------------------------------------------------------------
+
+    /** "like", "dislike" or "" for [videoId] (called on the WebView's bridge thread). */
+    fun pageLikeState(videoId: String): String = when (videoId) {
+        in likedSnapshot -> "like"
+        in dislikedSnapshot -> "dislike"
+        else -> ""
+    }
+
+    /**
+     * A tap on YouTube's Like or Dislike button ([kind] "like" / "dislike") for [videoId]:
+     * toggles it. Like = Library > Liked videos; dislike = left out of Home and a lower weight
+     * for its channel there. One excludes the other.
+     */
+    fun onPageLikeTap(videoId: String, kind: String) {
+        if (videoId.isBlank() || (kind != "like" && kind != "dislike")) return
+        val now = System.currentTimeMillis()
+        if (now - lastLikeTap < 500) return
+        lastLikeTap = now
+        val video = _videoState.value
+        viewModelScope.launch(Dispatchers.IO) {
+            if (video.videoId == videoId) rememberCurrent(video)
+            val liked = videoId in likedSnapshot
+            val disliked = videoId in dislikedSnapshot
+            if (kind == "like") {
+                if (disliked) library.setFeedback(videoId, FeedbackType.DISLIKED, false)
+                val nowLiked = library.toggleBuiltIn(BuiltInPlaylist.LIKED, videoId, liked)
+                showBanner(if (nowLiked) "Liked" else "Removed from liked")
+            } else {
+                if (liked) library.toggleBuiltIn(BuiltInPlaylist.LIKED, videoId, true)
+                library.setFeedback(videoId, FeedbackType.DISLIKED, !disliked)
+                if (!disliked) forYou.remove(videoId)
+                showBanner(if (!disliked) "Disliked: fewer videos like this" else "Dislike removed")
+            }
         }
     }
 

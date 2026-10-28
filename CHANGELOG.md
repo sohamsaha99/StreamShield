@@ -29,8 +29,13 @@ except the address bar and the bookmarks screen.
   playlists, "Not interested", search history.
 - **Subscriptions** from each channel's RSS feed; import from Google Takeout
   (`subscriptions.csv`); YouTube's own Subscribe buttons subscribe in the app; starred channels.
-- **Home → For you:** new uploads from subscriptions mixed 50/50 with videos related to what you
-  watch (`recommend/ForYouRule.kt`, reviewed rule).
+- **Home → For you** (`recommend/ForYouRule.kt`, reviewed rule, version 2): fresh subscription
+  uploads first, then a score-weighted random mix of related videos (rotating seeds, recent
+  watches count double), related of related, uploads of often-watched channels, recent searches
+  and subscription uploads; videos scrolled past without opening fade out; loads more as you
+  scroll.
+- YouTube's **Like / Dislike** buttons work in the app (Liked videos; a dislike lowers the
+  channel in For you).
 - **Backups:** export/import of the library and settings as one file, an optional daily backup
   into a folder you pick, and import of YouTube watch history from Google Takeout.
 
@@ -64,6 +69,10 @@ except the address bar and the bookmarks screen.
 - **No muted starts:** videos YouTube starts muted (the first one after opening the app, links
   opened in the app, autoplay with the screen off) play with sound; a mute chosen on the page
   is kept.
+- The cover shown while a video opens (thumbnail and title) goes away as soon as the new page is
+  there, instead of waiting for playback (it could stay up to 8 s on a phone).
+- The hidden player page stays empty until the first video or YouTube Music (it used to load
+  YouTube's home page at start, where YouTube played a feed preview in the background).
 - Taps on YouTube's play/pause that the page missed are applied by the app and counted in
   Settings → Diagnostics; the page's PiP flag is checked against the app's.
 - Battery: the player page is kept awake in the background only while something is loaded; the

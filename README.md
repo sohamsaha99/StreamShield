@@ -18,8 +18,12 @@ the app, around native screens laid out like the YouTube app.
 - **Pull down to refresh** on every page (on a video page, pull down to minimize it).
 
 **Your library (stored on the phone, no account)**
-- **Home → For you:** new uploads from your subscriptions mixed with videos related to what you
-  watch (rule in `recommend/ForYouRule.kt`). "Not interested" removes a video.
+- **Home → For you:** fresh uploads from your subscriptions first, then a mix of related videos
+  of what you watch, channels you watch often, your recent searches and more subscription
+  uploads; each pull-down draws a new mix, videos you scroll past fade out, and it keeps loading
+  as you scroll (rule in `recommend/ForYouRule.kt`). "Not interested" removes a video.
+- **Like / Dislike:** YouTube's own buttons under a video work without an account: likes go to
+  Library → Liked videos, a dislike removes the video from For you and shows less of its channel.
 - **Subscriptions:** YouTube's own Subscribe buttons subscribe in the app. Import your real
   subscriptions from Google Takeout (`subscriptions.csv`). Long-press a channel to star it.
 - **Library:** history (with resume), Watch later, Liked videos, playlists, downloads.

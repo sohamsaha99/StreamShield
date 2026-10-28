@@ -160,6 +160,10 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
    page's channel (player response), a channel row's link, or the channel page (its
    `channelMetadataRenderer`, noted from YouTube's JSON, or the URL). Buttons show the app's state
    through the synchronous bridge call `isSubscribed`.
+9. **Like / Dislike buttons** (video and Shorts pages on m.youtube.com, not comments): taps are
+   stopped the same way and sent as `onLikeTap {videoId, kind}`; the app keeps likes in Liked
+   videos and dislikes as feedback (`DISLIKED`). Buttons show the state from `likeState(videoId)`
+   (`aria-pressed`, a tint); `refreshLikeButtons()` after a change.
 9. **Browse page fade:** while YouTube swaps pages in the browse page, `html.ss-nav` dims the body
    briefly.
 
@@ -243,8 +247,9 @@ Bridge methods run on a background thread; the controllers post to the main thre
   daily job that applies it).
 
 ### `recommend/`
-- `ForYouRule.kt` (the reviewed "For you" rule, pure Kotlin) and `ForYouRepository.kt` (gathers
-  the library, fetches related lists, caches the result in `for_you.json`).
+- `ForYouRule.kt` (the reviewed "For you" rule, pure Kotlin) and `ForYouRepository.kt` (reads
+  the library, fetches related / related-of-related / search lists and watched channels' RSS
+  feeds within a budget, caches them, tracks what was shown, saves it all in `for_you.json`).
 
 ### `offline/`
 - `OfflinePlayerController.kt`: ExoPlayer for downloads; reports its state in the same shape as the
@@ -301,13 +306,18 @@ minimizes the player. Reloading YouTube Music while a song plays stops it, so
 `BrowserController.refreshPage` starts it again afterwards (`resumeMusic` through the player's
 `loadVideoById`; if that does not take, the song's page is opened and `seekWhenReady` seeks).
 
-**For you (Home).** `recommend/ForYouRule` (pure Kotlin, unit-tested) and `ForYouRepository`:
-new uploads from subscriptions (RSS feed) mixed 50/50 with YouTube's related lists of up to 8
-recently watched / liked / saved videos (NewPipe Extractor, cached for a day), ranked by
-freshness / seed overlap plus a channel score (watch time, subscribed, starred, likes), without
-watched / "Not interested" / Shorts / hidden channels, at most 3 per channel. Rebuilt when Home
-opens and the list is older than 4 h, or on pull-down; saved in `for_you.json`. Starred channels
-are a preference (`starredChannels`, long-press in the Subscriptions tab).
+**For you (Home).** `recommend/ForYouRule` (pure Kotlin, unit-tested; its KDoc is the reviewed
+rule) and `ForYouRepository`. Candidates: new uploads from subscriptions (RSS), YouTube's related
+lists for a rotating sample of up to 30 seed videos (recent watches count double), related lists
+of the best related videos, uploads of often-watched channels without a subscription (RSS) and
+results of recent searches (NewPipe Extractor; each list cached a day, a few fetched per refresh).
+Each gets a score (source terms, popularity, channel score minus dislikes); videos shown on
+screen in earlier lists without being opened are discounted (x 0.6 per list, 3 days). A refresh
+pins fresh subscription uploads, then draws the rest in a random order weighted by
+e^(score / 0.35) (Gumbel trick), every third a subscription upload, at most 2 per channel in 20.
+Home shows 30, then 20 more as you scroll, and asks the repository for more lists at the end.
+Rebuilt when Home opens and the list is older than 4 h, or on pull-down. Starred channels are a
+preference (`starredChannels`, long-press in the Subscriptions tab).
 
 **Background play.**
 1. A state of `playing=true` makes the ViewModel call `BackgroundPlaybackService.update(...)`

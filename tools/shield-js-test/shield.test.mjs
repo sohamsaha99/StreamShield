@@ -137,7 +137,9 @@ function bridgeInit(config) {
       },
       onPull: function (s) { window.__bridgeLog.push(['pull', s]); },
       onPullEnd: function (j) { window.__bridgeLog.push(['pullEnd', JSON.parse(j)]); },
-      onResumeResult: function (s) { window.__bridgeLog.push(['resume', s]); }
+      onResumeResult: function (s) { window.__bridgeLog.push(['resume', s]); },
+      onLikeTap: function (j) { window.__bridgeLog.push(['likeTap', JSON.parse(j)]); },
+      likeState: function (id) { return (window.__likeStates && window.__likeStates[id]) || ''; }
     };`;
 }
 
@@ -231,7 +233,8 @@ async function openWatchPage(config = {}, startUrl = 'https://m.youtube.com/watc
         if (url.pathname === '/youtubei/v1/next') {
             return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(nextResponse(url.searchParams.get('kind'))) });
         }
-        if (url.pathname === '/watch') {
+        // '/': YouTube's home page (the mock's video stands for a feed preview).
+        if (url.pathname === '/watch' || url.pathname === '/') {
             return route.fulfill({ status: 200, contentType: 'text/html', body: watchPage() });
         }
         return route.fulfill({ status: 404, body: '' });
@@ -850,6 +853,40 @@ console.log('Next / previous / autoplay');
 }
 
 // ---------------------------------------------------------------------------------------------
+console.log('Feed previews on m.youtube.com');
+{
+    // Outside a watch page (here YouTube's home page) YouTube plays feed items as muted
+    // previews: they are left alone (not refused, which slowed app start) and never unmuted.
+    async function mutedStart(page) {
+        return page.evaluate(async () => {
+            const v = document.querySelector('video');
+            v.muted = true;
+            const r = await v.play().then(() => 'played', (e) => 'refused:' + e.name);
+            await new Promise((ok) => setTimeout(ok, 400));
+            return { r, muted: v.muted, paused: v.paused };
+        });
+    }
+    let { context, page } = await openWatchPage({}, 'https://m.youtube.com/');
+    const home = await mutedStart(page);
+    check('home page: a muted feed preview is not refused and stays muted', home.r === 'played' && home.muted, home);
+    await context.close();
+
+    // After a video, YouTube moves to its home page in-page (its mini-player keeps the video).
+    ({ context, page } = await openWatchPage());
+    await page.evaluate(() => history.pushState({}, '', '/'));
+    const after = await mutedStart(page);
+    check("home page after a video: plays (YouTube's mini-player), not unmuted",
+        after.r === 'played' && after.muted && !after.paused, after);
+    await context.close();
+
+    // YouTube Music plays songs (with sound) from any page.
+    ({ context, page } = await openWatchPage({}, 'https://music.youtube.com/'));
+    const music = await mutedStart(page);
+    check('YouTube Music home page: a song plays with sound', music.r === 'played' && !music.muted, music);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
 console.log("YouTube's muted autoplay");
 {
     // The page starts the video muted, as m.youtube.com does when it was opened without a tap.
@@ -1144,6 +1181,58 @@ console.log('Subscribe button');
     await sleep(150);
     const taps = await page.evaluate(() => window.__bridgeLog.filter((e) => e[0] === 'subscribeTap').map((e) => e[1]));
     check('a deeply wrapped Subscribe button finds the nearest channel link', taps.length === 1 && taps[0].path === '/@deepchannel', taps);
+    await context.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+console.log('Like / Dislike buttons');
+{
+    const { context, page } = await openWatchPage();
+    // m.youtube.com's markup: a segmented like/dislike in the action bar, and a comment's like.
+    await page.evaluate(() => {
+        window.__ytPrompt = 0;
+        const bar = document.createElement('ytm-slim-video-action-bar-renderer');
+        bar.innerHTML = '<segmented-like-dislike-button-view-model>' +
+            '<like-button-view-model><button id="likeBtn" aria-label="like this video along with 1,234 other people">' +
+            '<span id="likeIcon">L</span><span>1.2K</span></button></like-button-view-model>' +
+            '<dislike-button-view-model><button id="dislikeBtn" aria-label="Dislike this video">D</button></dislike-button-view-model>' +
+            '</segmented-like-dislike-button-view-model>';
+        const comment = document.createElement('ytm-comment-renderer');
+        comment.innerHTML = '<button id="commentLike" aria-label="Like this comment along with 5 other people">L</button>';
+        document.body.append(bar, comment);
+        for (const id of ['likeBtn', 'dislikeBtn', 'commentLike']) {
+            document.getElementById(id).addEventListener('click', () => window.__ytPrompt++);
+        }
+    });
+    const taps = () => page.evaluate(() => window.__bridgeLog.filter((e) => e[0] === 'likeTap').map((e) => e[1]));
+    await page.click('#likeIcon');
+    await sleep(100);
+    await page.waitForTimeout(650);
+    await page.click('#dislikeBtn');
+    await sleep(100);
+    check('Like goes to the app with the video id', JSON.stringify((await taps())[0]) === JSON.stringify({ videoId: 'abc123def45', kind: 'like' }), await taps());
+    check('Dislike goes to the app', (await taps())[1] && (await taps())[1].kind === 'dislike', await taps());
+    check("YouTube's sign-in prompt never sees those taps", (await page.evaluate(() => window.__ytPrompt)) === 0);
+    await page.click('#commentLike');
+    await sleep(100);
+    check("a comment's Like is left to YouTube", (await taps()).length === 2 && (await page.evaluate(() => window.__ytPrompt)) === 1);
+
+    await page.evaluate(() => {
+        window.__likeStates = { abc123def45: 'like' };
+        window.__streamShield.refreshLikeButtons();
+    });
+    const shown = await page.evaluate(() => ({
+        like: [document.getElementById('likeBtn').getAttribute('data-ss-like'), document.getElementById('likeBtn').getAttribute('aria-pressed')],
+        dislike: [document.getElementById('dislikeBtn').getAttribute('data-ss-like'), document.getElementById('dislikeBtn').getAttribute('aria-pressed')],
+        comment: document.getElementById('commentLike').getAttribute('data-ss-like')
+    }));
+    check("the buttons show the app's state (liked)", JSON.stringify(shown) === JSON.stringify({ like: ['1', 'true'], dislike: ['0', 'false'], comment: null }), shown);
+    await page.evaluate(() => {
+        window.__likeStates = { abc123def45: 'dislike' };
+        window.__streamShield.refreshLikeButtons();
+    });
+    const flipped = await page.evaluate(() => [document.getElementById('likeBtn').getAttribute('aria-pressed'), document.getElementById('dislikeBtn').getAttribute('aria-pressed')]);
+    check('and follow it when it changes (disliked)', JSON.stringify(flipped) === JSON.stringify(['false', 'true']), flipped);
     await context.close();
 }
 

@@ -31,7 +31,9 @@ node --check app/src/main/assets/shield.js                          # quick synt
   release (`.github/workflows/build-apk.yml`).
 - The build needs Google Maven (`dl.google.com`), Maven Central and JitPack. In sandboxes without
   them, run at least the shield.js tests; the pure-Kotlin rules (`download/SmartRule.kt`,
-  `recommend/ForYouRule.kt`, `engine/RequestFilter.kt`) compile in a plain Kotlin/JVM project.
+  `recommend/ForYouRule.kt`, `engine/RequestFilter.kt`) compile in a plain Kotlin/JVM project
+  (the Kotlin compiler from GitHub releases works where Maven is blocked; JUnit test names must
+  not contain `:` or `.`).
 - The shield.js tests need the `playwright` npm package, Chromium and `ffmpeg` (used to generate a
   test clip).
 
@@ -109,6 +111,12 @@ installs on a phone over USB.
   app's own loads, background autoplay). `shield.js` unmutes on `playing`/`volumechange` through
   `player.unMute()`, except during ads and after the user muted with a mute/volume control on
   the page (remembered per tab in sessionStorage); at most 5 times per video.
+- **Feed previews / player page start.** The player page used to open on m.youtube.com's home
+  page, which nobody sees; YouTube played the first feed item there as a muted preview, and
+  once muted starts were unmuted that became hidden audio on app start. The player page now
+  starts empty (`BrowserController` loads nothing until the first video or YouTube Music), and
+  `shield.js` never unmutes outside a watch page. Refusing the previews' `play()` instead
+  coincided with a ~30 s black start screen on a phone; do not reintroduce it.
 - **PiP playback.** YouTube's player pauses the video when the window turns into PiP. Resuming
   with `video.play()` behind the player's back makes it pause again (audible stutter). Instead,
   `shield.js` refuses page `pause()` calls in PiP unless the user asked (`userPaused`), and resumes
@@ -132,6 +140,12 @@ installs on a phone over USB.
   `[StreamShield] subscribe tap {…}` with the button's ancestry to the console (logcat), which
   shows what to match when a channel cannot be identified.
 - **Shorts.** RSS feeds link Shorts as `/shorts/…`; `feed_items.isShort` keeps them out of For you.
+- **For you budget.** Each refresh fetches at most 6 related lists, 2 related-of-related lists,
+  1 search and the watched channels' RSS feeds (6 h); loading more fetches 4 + 2. Every NewPipe
+  stream request is a full YouTube page load, so keep these small. Lists are cached a day and
+  used for a week (`for_you.json`).
+- **Like / Dislike buttons** follow the Subscribe pattern (capture-phase stop, sync state call).
+  Comments have Like buttons too ("Like this comment …"); they must stay YouTube's.
 - **Downloads.** Stream URLs expire and some need the client's user agent; `RangeFetcher` and
   `OfflineDownloader` handle that. Do not reintroduce placeholder or sample-video fallbacks.
 

@@ -4,12 +4,15 @@ import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.NewPipe
+import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.channel.ChannelInfo
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
+import org.schabi.newpipe.extractor.search.SearchInfo
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper
+import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeSearchQueryHandlerFactory
 import org.schabi.newpipe.extractor.stream.AudioTrackType
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.StreamInfo
@@ -123,27 +126,41 @@ object NewPipeSupport {
      * finished live streams, no live streams.
      */
     fun relatedVideos(info: StreamInfo): List<RelatedVideo> =
-        info.relatedItems.orEmpty().mapNotNull { item ->
-            val stream = item as? StreamInfoItem ?: return@mapNotNull null
-            if (stream.streamType != StreamType.VIDEO_STREAM && stream.streamType != StreamType.POST_LIVE_STREAM) return@mapNotNull null
-            val id = videoIdFromUrl(stream.url) ?: return@mapNotNull null
-            val uploadedAt = try {
-                stream.uploadDate?.instant?.toEpochMilli() ?: 0L
-            } catch (_: Exception) {
-                0L
-            }
-            RelatedVideo(
-                videoId = id,
-                title = stream.name.orEmpty(),
-                channelId = channelIdFromUrl(stream.uploaderUrl),
-                channelName = stream.uploaderName.orEmpty(),
-                durationSec = stream.duration.toInt().coerceAtLeast(0),
-                viewCount = stream.viewCount.coerceAtLeast(0L),
-                uploadedAt = uploadedAt,
-                uploadedText = stream.textualUploadDate.orEmpty(),
-                isShort = stream.isShortFormContent || stream.url.orEmpty().contains("/shorts/")
-            )
+        info.relatedItems.orEmpty().mapNotNull { item -> (item as? StreamInfoItem)?.let(::toRelatedVideo) }
+
+    /**
+     * Blocking network call: YouTube's video results for [query] (first page), for the Home
+     * tab's "For you" (recent searches).
+     */
+    fun searchVideos(query: String): List<RelatedVideo> {
+        ensureInit()
+        val service = ServiceList.YouTube
+        val handler = service.searchQHFactory.fromQuery(query, listOf(YoutubeSearchQueryHandlerFactory.VIDEOS), "")
+        return SearchInfo.getInfo(service, handler).relatedItems.orEmpty()
+            .mapNotNull { item -> (item as? StreamInfoItem)?.let(::toRelatedVideo) }
+    }
+
+    /** A plain video or finished live stream as a [RelatedVideo]; null for live streams. */
+    private fun toRelatedVideo(stream: StreamInfoItem): RelatedVideo? {
+        if (stream.streamType != StreamType.VIDEO_STREAM && stream.streamType != StreamType.POST_LIVE_STREAM) return null
+        val id = videoIdFromUrl(stream.url) ?: return null
+        val uploadedAt = try {
+            stream.uploadDate?.instant?.toEpochMilli() ?: 0L
+        } catch (_: Exception) {
+            0L
         }
+        return RelatedVideo(
+            videoId = id,
+            title = stream.name.orEmpty(),
+            channelId = channelIdFromUrl(stream.uploaderUrl),
+            channelName = stream.uploaderName.orEmpty(),
+            durationSec = stream.duration.toInt().coerceAtLeast(0),
+            viewCount = stream.viewCount.coerceAtLeast(0L),
+            uploadedAt = uploadedAt,
+            uploadedText = stream.textualUploadDate.orEmpty(),
+            isShort = stream.isShortFormContent || stream.url.orEmpty().contains("/shorts/")
+        )
+    }
 
     /** Blocking network call: the channel id (UC...) of a channel page such as youtube.com/@name. */
     fun resolveChannelId(url: String): String? {

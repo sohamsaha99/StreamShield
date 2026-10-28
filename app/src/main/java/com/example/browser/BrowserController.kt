@@ -103,7 +103,10 @@ class BrowserController(
     init {
         configureWebView()
         observeViewModel()
-        webView.loadUrl(viewModel.browserState.value.url)
+        // Nothing is loaded until the first video or YouTube Music. (It used to open YouTube's
+        // home page here, which nobody sees: YouTube played a feed preview on it in the
+        // background, using data and battery; refusing that preview in shield.js was the likely
+        // cause of a ~30 s black start screen on a phone.)
     }
 
     // -------------------------------------------------------------------------------------------
@@ -287,6 +290,9 @@ class BrowserController(
             viewModel.subscriptionsChanged.collect { runPageCommand("refreshSubscribeButtons()") }
         }
         activity.lifecycleScope.launch {
+            viewModel.likesChanged.collect { runPageCommand("refreshLikeButtons()") }
+        }
+        activity.lifecycleScope.launch {
             viewModel.sponsorSegments.collect { pushSponsorSegments() }
         }
         activity.lifecycleScope.launch {
@@ -414,6 +420,19 @@ class BrowserController(
             val channel = parseChannel(json) ?: return false
             return viewModel.isChannelSubscribed(channel.id, channel.path)
         }
+
+        /** YouTube's Like / Dislike tapped: {videoId, kind: "like" | "dislike"}. */
+        @JavascriptInterface
+        fun onLikeTap(json: String?) {
+            val o = try { JSONObject(json ?: return) } catch (_: Exception) { return }
+            val videoId = o.optString("videoId")
+            val kind = o.optString("kind")
+            mainHandler.post { viewModel.onPageLikeTap(videoId, kind) }
+        }
+
+        /** "like", "dislike" or "" for the page's Like buttons. */
+        @JavascriptInterface
+        fun likeState(videoId: String?): String = viewModel.pageLikeState(videoId.orEmpty())
 
         @JavascriptInterface
         fun onResumeResult(result: String?) {

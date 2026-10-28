@@ -227,6 +227,13 @@ class BrowsePageController(
             return viewModel.isChannelSubscribed(channel.id, channel.path)
         }
 
+        /** Like / Dislike buttons are handled on video pages, which open in the player page. */
+        @JavascriptInterface
+        fun onLikeTap(json: String?) = Unit
+
+        @JavascriptInterface
+        fun likeState(videoId: String?): String = ""
+
         @JavascriptInterface
         fun onResumeResult(result: String?) = Unit
 
