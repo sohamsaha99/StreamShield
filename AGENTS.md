@@ -109,7 +109,11 @@ installs on a phone over USB.
   calls the page's next track and opens the next song's page only if that did not work. The
   ViewModel keeps the notification service "playing" (foreground + wake lock) for up to 30 s
   between the two videos; reporting "paused" there let Android suspend the app and stopped the
-  service from returning to the foreground. Settings → Diagnostics shows how the last autoplay
+  service from returning to the foreground. `holdThroughAutoplayGap()` must run on every state
+  report (it also ends the gap when the next video plays); a skipped call left the gap stuck and
+  broke every change after the first. Without the foreground service the app also loses network
+  in Doze, which the emulator (plugged in) does not show: test with
+  `adb shell dumpsys battery unplug` and `adb shell dumpsys deviceidle force-idle`. Settings → Diagnostics shows how the last autoplay
   went and how long the gap was.
 - **Muted autoplay.** YouTube starts a video muted when its page was opened without a tap (the
   app's own loads, background autoplay). `shield.js` unmutes on `playing`/`volumechange` through

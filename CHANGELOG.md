@@ -6,6 +6,10 @@ Releases are published from version tags: <https://github.com/streamshield-app/S
 
 - Ad blocking: if YouTube re-created its player while an ad was showing, the ad skipper kept
   running and skipped and muted the following videos; it now restores sound and speed and stops.
+- Autoplay with the screen off: only the first song or video change worked. After it, the
+  notification service left the foreground at the next change, Android did not let it return
+  while the screen was off, and playback stopped until the screen was turned on (most visible in
+  YouTube Music). Every change now keeps the service in the foreground.
 - Autoplay: a pause from the notification or lock screen after a video ended on screen no longer
   lets the app open the next video a few seconds later.
 - Library and downloads: subscriptions no longer refresh in full on every start when one channel's

@@ -789,7 +789,12 @@ class StreamShieldViewModel(application: Application) : AndroidViewModel(applica
             stopBackgroundSession()
             return
         }
-        val playing = state.isPlaying || holdThroughAutoplayGap(state)
+        // Always evaluated (not `isPlaying || hold…`): it is also what ends the gap once the next
+        // video plays. Skipped, the gap timed out as OVER and stayed so, and the next video's end
+        // took the service out of the foreground, which Android does not let it re-enter while
+        // the screen is off.
+        val holding = holdThroughAutoplayGap(state)
+        val playing = state.isPlaying || holding
         // Nothing to show until something actually plays; after that keep the controls updated.
         if (!playing && !bgSessionActive) return
         val signature = "${state.title}|${state.channel}|${state.durationSec}|$playing"
