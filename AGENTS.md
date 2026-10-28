@@ -34,7 +34,7 @@ node --check app/src/main/assets/shield.js                          # quick synt
 
 - There is no `gradlew` script checked in. `tools/dev-setup.sh` generates it, plus the git-ignored
   `debug.keystore` that debug builds are signed with, and `local.properties`; or use Android
-  Studio. CI and releases: [README → Build on GitHub](README.md#build-on-github).
+  Studio. Building, CI, releases and signing: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 - The build needs Google Maven (`dl.google.com`), Maven Central and JitPack. In sandboxes without
   them, run at least the shield.js tests; the pure-Kotlin rules (`download/SmartRule.kt`,
   `recommend/ForYouRule.kt`, `engine/RequestFilter.kt`) compile in a plain Kotlin/JVM project.
