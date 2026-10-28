@@ -1,6 +1,6 @@
 {
   "name": "StreamShield",
-  "description": "Ad-blocking YouTube browser with background playback, lock-screen controls, custom playback speed, SponsorBlock skipping, fullscreen and Picture-in-Picture.",
+  "description": "Ad-free YouTube and YouTube Music without an account: YouTube-app-style tabs, a local library (subscriptions, history, playlists, For you), downloads with smart music downloads, background playback, SponsorBlock, fullscreen and Picture-in-Picture.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

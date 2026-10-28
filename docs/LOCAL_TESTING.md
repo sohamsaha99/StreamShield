@@ -198,7 +198,7 @@ by the owner or never verified; prioritise them.
    the mix plays, and `index` in the URL increases.
 2. **Mix with the screen off:** the same, with the screen off.
 3. **Playlist:** the same with a normal playlist (`list=PL…`).
-4. **Single video,** "Autoplay next video" on: the suggestion plays. With it off: nothing plays.
+4. **Single video,** the "Autoplay" setting on: the suggestion plays. With it off: nothing plays.
 5. **App visible:** YouTube's own countdown runs and the app does not interfere.
 
 ### G. App behaviour

@@ -44,6 +44,8 @@ class BackgroundPlaybackService : Service() {
                 override fun onPlay() = handleControl(PlaybackCommand.PLAY)
                 override fun onPause() = handleControl(PlaybackCommand.PAUSE)
                 override fun onStop() = handleControl(PlaybackCommand.STOP)
+                override fun onSkipToNext() = handleControl(PlaybackCommand.NEXT)
+                override fun onSkipToPrevious() = handleControl(PlaybackCommand.PREVIOUS)
             })
             setSessionActivity(openAppIntent())
             isActive = true
@@ -62,6 +64,8 @@ class BackgroundPlaybackService : Service() {
             ACTION_PLAY -> handleControl(PlaybackCommand.PLAY)
             ACTION_PAUSE -> handleControl(PlaybackCommand.PAUSE)
             ACTION_STOP -> handleControl(PlaybackCommand.STOP)
+            ACTION_NEXT -> handleControl(PlaybackCommand.NEXT)
+            ACTION_PREVIOUS -> handleControl(PlaybackCommand.PREVIOUS)
             ACTION_SHUTDOWN -> {
                 // May arrive right after startForegroundService(): honour that contract first.
                 if (!isForeground) startForegroundSafely(buildNotification())
@@ -86,6 +90,8 @@ class BackgroundPlaybackService : Service() {
             PlaybackCommand.PAUSE -> { playing = false; render() }
             PlaybackCommand.TOGGLE -> { playing = !playing; render() }
             PlaybackCommand.STOP -> shutdown()
+            // The page reports the new track a moment later via ACTION_UPDATE.
+            PlaybackCommand.NEXT, PlaybackCommand.PREVIOUS -> Unit
         }
     }
 
@@ -126,7 +132,8 @@ class BackgroundPlaybackService : Service() {
             PlaybackStateCompat.Builder()
                 .setActions(
                     PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
-                        PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_STOP
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_STOP or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
                 )
                 .setState(
                     if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
@@ -228,6 +235,12 @@ class BackgroundPlaybackService : Service() {
         val stop = NotificationCompat.Action(
             android.R.drawable.ic_menu_close_clear_cancel, "Stop", serviceIntent(ACTION_STOP, 101)
         )
+        val previous = NotificationCompat.Action(
+            android.R.drawable.ic_media_previous, "Previous", serviceIntent(ACTION_PREVIOUS, 105)
+        )
+        val next = NotificationCompat.Action(
+            android.R.drawable.ic_media_next, "Next", serviceIntent(ACTION_NEXT, 106)
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title.ifBlank { "YouTube" })
@@ -239,12 +252,14 @@ class BackgroundPlaybackService : Service() {
             .setShowWhen(false)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(previous)
             .addAction(playPause)
+            .addAction(next)
             .addAction(stop)
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0, 1)
+                    .setShowActionsInCompactView(0, 1, 2)
             )
             .build()
     }
@@ -256,6 +271,8 @@ class BackgroundPlaybackService : Service() {
         private const val ACTION_PLAY = "com.example.action.BG_PLAY"
         private const val ACTION_PAUSE = "com.example.action.BG_PAUSE"
         private const val ACTION_STOP = "com.example.action.BG_STOP"
+        private const val ACTION_NEXT = "com.example.action.BG_NEXT"
+        private const val ACTION_PREVIOUS = "com.example.action.BG_PREVIOUS"
         private const val ACTION_SHUTDOWN = "com.example.action.BG_SHUTDOWN"
         private const val EXTRA_TITLE = "extra_title"
         private const val EXTRA_ARTIST = "extra_artist"

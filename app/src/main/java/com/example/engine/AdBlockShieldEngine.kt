@@ -42,15 +42,28 @@ object AdBlockShieldEngine {
         return script
     }
 
-    fun configJson(prefs: ShieldPreferencesState, inPip: Boolean, appVisible: Boolean = true): String {
+    /**
+     * Config for the page script; [role] is "player" (plays videos) or "browse" (see shield.js).
+     * [pull] is what a pull-down from the top of the page does: "refresh", "minimize" or "off".
+     */
+    fun configJson(
+        prefs: ShieldPreferencesState,
+        inPip: Boolean,
+        role: String = "player",
+        appVisible: Boolean = true,
+        pull: String = "off"
+    ): String {
+        val browse = role == "browse"
         return JSONObject()
-            .put("adBlock", prefs.adBlockEnabled)
-            .put("bgPlay", prefs.backgroundPlayEnabled)
-            .put("speed", prefs.playbackSpeed.toDouble())
-            .put("pip", inPip)
-            .put("sponsorSkip", prefs.sponsorSkipEnabled)
-            .put("autoAdvance", prefs.autoAdvanceEnabled)
+            .put("role", role)
             .put("appVisible", appVisible)
+            .put("pull", if (inPip) "off" else pull)
+            .put("adBlock", prefs.adBlockEnabled)
+            .put("bgPlay", prefs.backgroundPlayEnabled && !browse)
+            .put("speed", prefs.playbackSpeed.toDouble())
+            .put("pip", inPip && !browse)
+            .put("sponsorSkip", prefs.sponsorSkipEnabled)
+            .put("autoplay", prefs.autoplayEnabled)
             .toString()
     }
 }
