@@ -39,12 +39,13 @@ Android 7.0 or newer. Picture-in-picture needs Android 8.0; public download fold
 Android 10.
 
 - **From GitHub (no cable):** on the phone, open
-  <https://github.com/somak135/StreamShieldv2/releases/download/latest/StreamShield.apk> (or
-  **Releases → "StreamShield (latest build)"**) and open the downloaded file. Allow "Install
-  unknown apps" for the browser when asked; if Play Protect warns, choose "Install anyway". The
-  release is rebuilt on every push to `main` (see [Build on GitHub](#build-on-github)). It is
-  marked as a pre-release, so GitHub's `/releases/latest` address does not find it; use the link
-  above.
+  <https://github.com/streamshield-app/StreamShield/releases/latest/download/StreamShield.apk>
+  (the newest version release, or **Releases** on the repository page) and open the downloaded
+  file. Allow "Install unknown apps" for the browser when asked; if Play Protect warns, choose
+  "Install anyway".
+- **Newest build (testing):** every push to `main` rebuilds the pre-release "StreamShield (latest
+  build)": <https://github.com/streamshield-app/StreamShield/releases/download/latest/StreamShield.apk>.
+  See [Build on GitHub](#build-on-github).
 - **From Google AI Studio (USB):** open the project in AI Studio in Chrome or Edge, turn on USB
   debugging on the phone, plug it in and press **Install**. AI Studio's **Export → Download as
   .zip** contains the source only, not the APK or AI Studio's signing key.
@@ -100,9 +101,17 @@ tools/dev-setup.sh && ./gradlew assembleDebug testDebugUnitTest      # inside th
 and on demand (**Actions → Build APK → Run workflow**). Each build:
 
 1. uploads the APK as the run's artifact **StreamShield-debug-apk** (needs a GitHub login), and
-2. except for pull requests, replaces the **`latest` release** with the new `StreamShield.apk`.
-   Its download link works without a GitHub account if the repository is public; share it with
-   friends.
+2. on `main`, replaces the **`latest` pre-release** with the new `StreamShield.apk`.
+
+To publish a version, tag a commit on `main` and push the tag:
+
+```sh
+git tag v1.1.0 && git push origin v1.1.0
+```
+
+That build creates the release **StreamShield v1.1.0** with `StreamShield-v1.1.0.apk` (and
+`StreamShield.apk`, for the fixed `releases/latest/download/StreamShield.apk` link), marked as
+the repository's latest release. Download links work without a GitHub account.
 
 On a fork, GitHub keeps Actions off until you open the **Actions** tab and enable them.
 

@@ -7,8 +7,8 @@ except the address bar and the bookmarks screen.
 
 ## Merged back into StreamShield (2026-10-28)
 
-The fork was merged into [sohamsaha99/StreamShield](https://github.com/sohamsaha99/StreamShield)
-together with the original's newer commits (`84418cd` to `a6e2bc8`):
+The fork was merged into the original, now
+[streamshield-app/StreamShield](https://github.com/streamshield-app/StreamShield), together with the original's newer commits (`84418cd` to `a6e2bc8`):
 
 - Autoplay while hidden: the fork's version is kept (it covers YouTube Music and diagnostics).
   The original's "Autoplay next video" setting is folded into **Autoplay**; a value saved under
