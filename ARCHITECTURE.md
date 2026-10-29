@@ -90,6 +90,8 @@ is not recreated in those cases, so the WebViews keep playing.
 - **Config push:** observes preferences, PiP state, app visibility and the pull-down mode and calls
   `window.__streamShield.setConfig(...)` when they change. The page echoes its PiP flag in each
   state report; if it differs from the app's, the config is sent again.
+- **Start:** the player page loads nothing until the first video or YouTube Music. (On YouTube's
+  home page, which nobody sees there, YouTube played a feed item as a background preview.)
 - **Visits:** every page the app opens with `load()` starts a *visit*; Back walks the WebView
   history only inside it. `refreshPage()` reloads (pull-to-refresh) and restarts a YouTube Music
   song that was playing.
@@ -142,13 +144,16 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
    - autoplay while hidden: on `ended` in PiP or with the app hidden, open the next video of the
      mix/playlist (or the suggestion, if Autoplay is on) captured from watch-next responses
      (`nextByVideo`); on YouTube Music, the page's next track first;
+   - muted starts: a video YouTube started muted is unmuted through `player.unMute()` (not during
+     ads, not after the user muted on the page, at most 5 times per video), only on a watch page
+     or YouTube Music, so feed previews elsewhere stay muted;
    - start-up diagnostics (time to first frame, time in ad state, ads removed, 17 s timers
      shortened), sent with the state report, shown in Settings → Diagnostics and, unless turned
      off, as a short note when a video starts. For in-page navigation, timing starts at the user's
      last tap (the URL only changes, via `history.pushState`, once the data has arrived).
 5. **Native → page API:** `window.__streamShield.setConfig`, `setSponsorSegments`, `play`, `pause`,
    `togglePlay`, `next`, `previous`, `exitFullscreen`, `nudgeLayout`, `refreshSubscribeButtons`,
-   `resumeMusic`, `seekWhenReady`. `getConfig`, `reportState` and `internals` are for tests and
+   `refreshLikeButtons`, `resumeMusic`, `seekWhenReady`. `getConfig`, `reportState` and `internals` are for tests and
    CDP debugging.
 6. **Play/pause taps:** a tap on a visible play/pause control in the player that has not changed
    playback 400 ms later is applied by the app (`pauseVideo` / `resumeVideo`). Each fix is counted
@@ -165,7 +170,12 @@ The page script. It is idempotent: it returns early if `window.__streamShield` e
    page's channel (player response), a channel row's link, or the channel page (its
    `channelMetadataRenderer`, noted from YouTube's JSON, or the URL). Buttons show the app's state
    through the synchronous bridge call `isSubscribed`.
-9. **Browse page fade:** while YouTube swaps pages in the browse page, `html.ss-nav` dims the body
+9. **Like / Dislike buttons** (video and Shorts pages on m.youtube.com, not comments): taps are
+   stopped the same way and sent as `onLikeTap {videoId, kind}`; the app keeps likes in Liked
+   videos and dislikes as feedback (`DISLIKED`). Buttons show the state from `likeState(videoId)`
+   (`aria-pressed`, a tint); `refreshLikeButtons()` after a change. The browse page never shows a
+   video page, so its bridge answers these calls with no-ops.
+10. **Browse page fade:** while YouTube swaps pages in the browse page, `html.ss-nav` dims the body
    briefly.
 
 Page → native calls go through `window.StreamShieldBridge`: `getConfig()` and `isSubscribed(json)`
@@ -193,7 +203,7 @@ Bridge methods run on a background thread; the controllers post to the main thre
   opening-video placeholder, For you, and diagnostics. It records history and the listening log
   from `onVideoState`, fetches SponsorBlock segments, keeps the background service in sync, and
   batches counters (flushed to DataStore at most every 5 s and on `onStop`).
-- `screens/`: `HomeScreen` (search, Continue watching, For you, Recently watched), `MusicScreen`,
+- `screens/`: `HomeScreen` (search, Continue watching, Recently watched, For you), `MusicScreen`,
   `SubscriptionsScreen` (channels with stars, feed), `LibraryScreen` (history, playlists),
   `DownloadsScreen`, `BrowserScreen` (player page: the WebView, the opening-video placeholder, the
   pull indicator and the player control bar), `BrowsePageScreen`, `OfflinePlayerScreen` and
@@ -228,7 +238,7 @@ Bridge methods run on a background thread; the controllers post to the main thre
   version without a migration wipes the library**.
 - `LibraryEntities.kt`, `LibraryDao.kt`, `LibraryRepository.kt`: videos, watch entries (resume
   position, watched fraction), subscriptions, feed items, playlists (Watch later and Liked are
-  built in), feedback ("Not interested") and searches.
+  built in), feedback ("Not interested", hidden channels, dislikes) and searches.
 - `OfflineEntities.kt`: downloads (`offline_items`), the listening log (`play_events`) and smart
   downloads the rule removed (`smart_removed`).
 - `SubscriptionFeed.kt`: the RSS client and parser (also marks Shorts), the refresher, and the
@@ -248,8 +258,9 @@ Bridge methods run on a background thread; the controllers post to the main thre
   daily job that applies it).
 
 ### `recommend/`
-- `ForYouRule.kt` (the reviewed "For you" rule, pure Kotlin) and `ForYouRepository.kt` (gathers
-  the library, fetches related lists, caches the result in `for_you.json`).
+- `ForYouRule.kt` (the reviewed "For you" rule, pure Kotlin) and `ForYouRepository.kt` (reads
+  the library, fetches related / related-of-related / search lists and watched channels' RSS
+  feeds within a budget, caches them, tracks what was shown, saves it all in `for_you.json`).
 
 ### `offline/`
 - `OfflinePlayerController.kt`: ExoPlayer for downloads; reports its state in the same shape as the
@@ -294,8 +305,9 @@ above the tabs (`zIndex`) and slides it up from the bottom (`playerSlide`, an `A
 minimizing slides it down and puts it back underneath. Back on a video page uses
 `PredictiveBackHandler` (the player follows the gesture on Android 14+; the manifest enables
 `enableOnBackInvokedCallback`), and the page script's pull-down drives the same slide. While a
-video loads, `pendingVideo` (thumbnail and title) covers the page until it plays (at most 8 s, or
-2.5 s after the page loaded). The tab area is an `AnimatedContent` keyed by `TabScreen`: deeper
+video loads, `pendingVideo` (thumbnail and title) covers the page until it plays, 1.2 s after the
+new video's page first reports its state, 2.5 s after the page loaded, or 5 s at most, whichever
+comes first. The tab area is an `AnimatedContent` keyed by `TabScreen`: deeper
 screens (browse page, Library sub-screens) slide in from the right, other tabs cross-fade.
 
 **Pull-to-refresh.** Native screens use `PullToRefreshContainer` (nested scrolling, no
@@ -306,13 +318,18 @@ minimizes the player. Reloading YouTube Music while a song plays stops it, so
 `BrowserController.refreshPage` starts it again afterwards (`resumeMusic` through the player's
 `loadVideoById`; if that does not take, the song's page is opened and `seekWhenReady` seeks).
 
-**For you (Home).** `recommend/ForYouRule` (pure Kotlin, unit-tested) and `ForYouRepository`:
-new uploads from subscriptions (RSS feed) mixed 50/50 with YouTube's related lists of up to 8
-recently watched / liked / saved videos (NewPipe Extractor, cached for a day), ranked by
-freshness / seed overlap plus a channel score (watch time, subscribed, starred, likes), without
-watched / "Not interested" / Shorts / hidden channels, at most 3 per channel. Rebuilt when Home
-opens and the list is older than 4 h, or on pull-down; saved in `for_you.json`. Starred channels
-are a preference (`starredChannels`, long-press in the Subscriptions tab).
+**For you (Home).** `recommend/ForYouRule` (pure Kotlin, unit-tested; its KDoc is the reviewed
+rule) and `ForYouRepository`. Candidates: new uploads from subscriptions (RSS), YouTube's related
+lists for a rotating sample of up to 30 seed videos (recent watches count double), related lists
+of the best related videos, uploads of often-watched channels without a subscription (RSS) and
+results of recent searches (NewPipe Extractor; each list cached a day, a few fetched per refresh).
+Each gets a score (source terms, popularity, channel score minus dislikes); videos shown on
+screen in earlier lists without being opened are discounted (x 0.6 per list, 3 days). A refresh
+pins fresh subscription uploads, then draws the rest in a random order weighted by
+e^(score / 0.35) (Gumbel trick), every third a subscription upload, at most 2 per channel in 20.
+Home shows 30, then 20 more as you scroll, and asks the repository for more lists at the end.
+Rebuilt when Home opens and the list is older than 4 h, or on pull-down. Starred channels are a
+preference (`starredChannels`, long-press in the Subscriptions tab).
 
 **Background play.**
 1. A state of `playing=true` makes the ViewModel call `BackgroundPlaybackService.update(...)`
@@ -362,6 +379,7 @@ button, calls `onHideCustomView`.
   `recommend/ForYouRuleTest.kt` cover the two reviewed rules.
 - `tools/shield-js-test/shield.test.mjs` runs `shield.js` in headless Chromium against mock
   YouTube pages. It covers pruning, the ad fallback, background-play events, speed, SponsorBlock,
-  PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe buttons, pull-down
+  PiP layout, page routing, the heartbeat, play/pause tap fixes, Subscribe and Like / Dislike
+  buttons, feed previews left muted, pull-down
   gestures, the browse-page fade, resuming after a reload and parse overhead. It cannot catch
   YouTube changing its markup or JSON shape, so verify on a device after YouTube updates.

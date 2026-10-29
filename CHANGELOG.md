@@ -2,6 +2,34 @@
 
 Releases are published from version tags: <https://github.com/streamshield-app/StreamShield/releases>.
 
+## Unreleased
+
+Merged from [somak135/StreamShieldv2](https://github.com/somak135/StreamShieldv2) (commit `c6f91f2`).
+
+- **Like / Dislike:** YouTube's own buttons under a video work without an account. A like adds the video to Library → Liked videos; a dislike removes it
+  from For you and lowers its channel there. Tapping again undoes it, and one replaces the other.
+  The buttons show the app's state; comments' Like buttons stay YouTube's.
+- **Home → For you, version 2** (`recommend/ForYouRule.kt`, reviewed rule):
+  - more sources: related videos of a rotating sample of up to 30 seed videos (recent watches
+    count double), related videos of the best related videos, recent uploads of channels you
+    watch often without a subscription (RSS) and results of your 2 most recent searches;
+  - fresh subscription uploads (48 h) come first, then a random order weighted by score, every
+    third video a subscription upload, at most 2 per channel in any 20;
+  - each pull-down draws a new mix; videos that were on screen without being opened score lower
+    in the next lists (for 3 days);
+  - Home shows 30 videos, 20 more as you scroll, and fetches a few more lists at the end;
+  - each refresh fetches only a few lists from YouTube; lists are cached a day and used for a
+    week.
+- Home: "Recently watched" now comes before For you, which grows as you scroll.
+- The hidden player page no longer loads YouTube's home page at start, where YouTube played a
+  feed preview in the background (heard as audio once muted starts were unmuted). It stays empty
+  until the first video or YouTube Music, and the page script never unmutes outside a watch page.
+- The cover shown while a video opens (thumbnail and title) goes away about 1 s after the new
+  page is there instead of waiting for playback (it could stay up to 8 s on a phone; now at most
+  5 s).
+- Tests: shield.js tests for Like / Dislike and feed previews; `ForYouRuleTest` rewritten for the
+  new rule.
+
 ## 1.0.1 (2026-10-28)
 
 - Ad blocking: if YouTube re-created its player while an ad was showing, the ad skipper kept

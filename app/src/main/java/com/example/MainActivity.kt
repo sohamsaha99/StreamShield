@@ -733,6 +733,9 @@ fun StreamShieldApp(
                                         forYou = forYouState.items,
                                         forYouRefreshing = forYouState.refreshing,
                                         forYouNote = forYouState.note,
+                                        forYouGeneration = forYouState.generation,
+                                        forYouExtending = forYouState.extending,
+                                        forYouEnd = forYouState.endReached,
                                         history = history,
                                         recentSearches = recentSearches,
                                         onSearch = viewModel::search,
@@ -741,6 +744,9 @@ fun StreamShieldApp(
                                         onSeeHistory = { viewModel.openLibraryRoute(LibraryRoute.History) },
                                         onDownload = viewModel::requestDownload,
                                         onNotInterested = viewModel::forYouNotInterested,
+                                        onForYouOpened = viewModel::forYouOpened,
+                                        onForYouSeen = viewModel::forYouSeen,
+                                        onLoadMore = viewModel::forYouLoadMore,
                                         modifier = Modifier.fillMaxSize()
                                     )
                                 }

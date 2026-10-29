@@ -105,7 +105,8 @@ enum class BuiltInPlaylist(val title: String) {
     LIKED("Liked videos")
 }
 
-enum class FeedbackType { NOT_INTERESTED, HIDE_CHANNEL }
+/** DISLIKED: YouTube's Dislike button on a video (left out of Home, lowers its channel). */
+enum class FeedbackType { NOT_INTERESTED, HIDE_CHANNEL, DISLIKED }
 
 // -------------------------------------------------------------------------------------------
 // Query results (joins)

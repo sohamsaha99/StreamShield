@@ -41,10 +41,13 @@ it is not on the Play Store.
 
 **Your library, without an account**
 - History with resume, Watch later, Liked videos and your own playlists.
+- YouTube's Like and Dislike buttons work in the app: a like goes to Liked videos, a dislike
+  shows less of that channel in For you.
 - Subscriptions: YouTube's Subscribe buttons subscribe in the app, and you can import your
   subscriptions from Google Takeout. New uploads come from each channel's RSS feed.
-- Home → **For you**: new uploads from your subscriptions mixed with videos related to what you
-  watched in the app.
+- Home → **For you**: fresh uploads from your subscriptions first, then a mix of videos related
+  to what you watched in the app, channels you watch often and your recent searches. Each
+  pull-down draws a new mix, and more loads as you scroll.
 - Backups: export and import everything as one file, an optional daily backup to a folder you
   choose, and import of your YouTube watch history from Google Takeout.
 

@@ -21,7 +21,7 @@
  *      channel, length and position from the player response.
  *   7. Taps on the page's play/pause control that the page missed are applied by the app.
  *   8. Pull-down gestures (refresh / minimize) are reported to the app, which draws them.
- *   9. YouTube's Subscribe buttons subscribe in the app (local subscriptions, no account).
+ *   9. YouTube's Subscribe, Like and Dislike buttons work in the app (no account).
  *  10. Browse page: a short fade while YouTube swaps pages.
  *
  * Native side talks to this script through window.__streamShield.* and receives events through
@@ -918,6 +918,15 @@
         };
     })();
 
+    // m.youtube.com outside a watch page (no video id in the address): YouTube plays feed items
+    // there as muted previews. Those are never unmuted (see ensureSound). The player page no
+    // longer opens on YouTube's home page (BrowserController), so normally it never shows one.
+    // Refusing the previews' play() here instead coincided with a ~30 s black start screen on a
+    // phone (YouTube's preview code probably kept retrying); do not reintroduce that.
+    function outsideWatchPage() {
+        return isMobileYouTube && !currentVideoId();
+    }
+
     function pauseVideo(v) {
         allowPauseCall = true;
         try { v.pause(); } finally { allowPauseCall = false; }
@@ -1052,7 +1061,8 @@
     }
 
     function ensureSound(video) {
-        if (!video || adActive || userMuted || isBrowsePage()) return;
+        // Only the video of a watch page (or a song): feed previews stay as YouTube started them.
+        if (!video || adActive || userMuted || isBrowsePage() || outsideWatchPage()) return;
         var player = hookedPlayer || findPlayer();
         var playerMuted = false;
         try { playerMuted = !!(player && typeof player.isMuted === 'function' && player.isMuted()); } catch (e) {}
@@ -1575,6 +1585,7 @@
             hideOpenAppButton();
             dismissAppUpsell();
             markSubscribeButtons();
+            markLikeButtons();
         }
         if (isBrowsePage()) return;
         trackNavigation();
@@ -1907,6 +1918,90 @@
     });
 
     // ---------------------------------------------------------------------------------------
+    // 9. Like / Dislike on a video page: kept by the app (there is no Google account)
+    // ---------------------------------------------------------------------------------------
+    // A tap on YouTube's Like or Dislike for the video (not a comment's) goes to the app instead
+    // of YouTube's sign-in prompt, and the buttons show the app's state (aria-pressed, a tint).
+    var LIKE_HOSTS = 'like-button-view-model, dislike-button-view-model, segmented-like-dislike-button-view-model, ' +
+        'ytm-like-button-renderer, ytm-segmented-like-dislike-button-renderer, ytm-slim-video-action-bar-renderer';
+    var LIKE_SCAN = LIKE_HOSTS.split(', ').map(function (h) { return h + ' button'; }).join(', ') +
+        ', button[aria-label*="like this video" i]';
+    var LIKE_LABEL = /^(i )?like this video\b|^like$/i;
+    var DISLIKE_LABEL = /^(i )?dislike this video\b|^dislike$/i;
+    var COMMENT_AREA = 'ytm-comment-renderer, ytm-comment-thread-renderer, ytm-comments-entry-point-header-renderer, ' +
+        'ytm-engagement-panel-section-list-renderer, ytm-comment-action-buttons-renderer';
+    var LIKED_CSS = '[data-ss-like="1"], [data-ss-like="1"] * { color: #3ea6ff !important; fill: #3ea6ff !important; }';
+    var likeCache = { id: '', value: null, at: 0 };
+    var lastLikeTap = 0;
+
+    function likeKindOf(btn) {
+        var label = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').trim();
+        if (DISLIKE_LABEL.test(label)) return 'dislike';
+        if (LIKE_LABEL.test(label)) return 'like';
+        // Unlabelled buttons inside YouTube's own like / dislike components.
+        if (btn.closest('dislike-button-view-model')) return 'dislike';
+        if (btn.closest('like-button-view-model')) return 'like';
+        return '';
+    }
+
+    function likeButtonFor(target) {
+        if (isBrowsePage() || !isMobileYouTube) return null;
+        if (location.pathname !== '/watch' && !/^\/shorts\//.test(location.pathname)) return null;
+        var btn = target && target.closest && target.closest('button, [role="button"]');
+        if (!btn || btn.closest(COMMENT_AREA)) return null;
+        var kind = likeKindOf(btn);
+        if (!kind) return null;
+        var label = (btn.getAttribute('aria-label') || '').trim();
+        if (!/this video/i.test(label) && !btn.closest(LIKE_HOSTS)) return null;
+        return { btn: btn, kind: kind };
+    }
+
+    /** 'like', 'dislike', '' (neither) or null (unknown) for the video, from the app. */
+    function likeState(videoId) {
+        if (!videoId || !bridge || typeof bridge.likeState !== 'function') return null;
+        if (likeCache.id === videoId && Date.now() - likeCache.at < 4000) return likeCache.value;
+        var value = null;
+        try { value = String(bridge.likeState(videoId) || ''); } catch (e) {}
+        likeCache = { id: videoId, value: value, at: Date.now() };
+        return value;
+    }
+
+    function markLikeButtons() {
+        if (!document.body || !isMobileYouTube || isBrowsePage()) return;
+        var id = currentVideoId();
+        var state = id ? likeState(id) : null;
+        if (state === null) return;
+        ensureStyle('streamshield-like', LIKED_CSS, true);
+        var list = document.querySelectorAll(LIKE_SCAN);
+        for (var i = 0; i < list.length && i < 12; i++) {
+            var found = likeButtonFor(list[i]);
+            if (!found) continue;
+            var on = found.kind === state;
+            if (found.btn.getAttribute('data-ss-like') !== (on ? '1' : '0')) found.btn.setAttribute('data-ss-like', on ? '1' : '0');
+            if (found.btn.getAttribute('aria-pressed') !== String(on)) found.btn.setAttribute('aria-pressed', String(on));
+        }
+    }
+
+    function onLikeEvent(e) {
+        var found = likeButtonFor(e.target);
+        if (!found) return;
+        // YouTube's own handlers (they open its sign-in prompt) never see this tap.
+        e.stopImmediatePropagation();
+        if (e.type !== 'click') return;
+        e.preventDefault();
+        if (Date.now() - lastLikeTap < 600) return;
+        lastLikeTap = Date.now();
+        var id = currentVideoId();
+        if (!id) return;
+        likeCache = { id: '', value: null, at: 0 };
+        report('onLikeTap', JSON.stringify({ videoId: id, kind: found.kind }));
+    }
+
+    ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click'].forEach(function (type) {
+        window.addEventListener(type, onLikeEvent, true);
+    });
+
+    // ---------------------------------------------------------------------------------------
     // 8. Browse page: a short fade while YouTube swaps the page (search -> channel, Back, ...)
     // ---------------------------------------------------------------------------------------
     var FADE_CSS = 'html.ss-nav body { opacity: 0.55 !important; transition: opacity 120ms ease-out !important; }\n' +
@@ -2046,6 +2141,11 @@
         refreshSubscribeButtons: function () {
             subCache = {};
             markSubscribeButtons();
+        },
+        // The app's likes / dislikes changed: show the new state on the page's buttons.
+        refreshLikeButtons: function () {
+            likeCache = { id: '', value: null, at: 0 };
+            markLikeButtons();
         },
         // YouTube Music after the app reloaded the page: play the song that was playing, from
         // where it was, through the player's own API (the page stays where it is). Reports
